@@ -1,6 +1,8 @@
 /*
- * FreeRTOS SMP Kernel V202110.00
- * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * FreeRTOS Kernel <DEVELOPMENT BRANCH>
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ *
+ * SPDX-License-Identifier: MIT
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -116,17 +118,5 @@ typedef void (* TaskFunction_t)( void * );
 #define pdLITTLE_ENDIAN                   pdFREERTOS_LITTLE_ENDIAN
 #define pdBIG_ENDIAN                      pdFREERTOS_BIG_ENDIAN
 
-
-/* ------------------------------------------------ IDF Compatibility --------------------------------------------------
- *
- * ------------------------------------------------------------------------------------------------------------------ */
-
-#ifdef ESP_PLATFORM
-
-#ifndef pdTICKS_TO_MS
-    #define pdTICKS_TO_MS( xTicks )   ( ( TickType_t ) ( ( uint64_t ) ( xTicks ) * 1000 / configTICK_RATE_HZ ) )
-#endif
-
-#endif // ESP_PLATFORM
 
 #endif /* PROJDEFS_H */
