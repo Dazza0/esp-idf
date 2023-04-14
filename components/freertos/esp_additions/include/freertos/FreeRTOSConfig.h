@@ -14,6 +14,8 @@
 #ifndef __ASSEMBLER__
     /* For configASSERT() */
     #include <assert.h>
+    /* required for esp_reent_init() in tasks.c */
+    #include "esp_newlib.h"
 #endif /* def __ASSEMBLER__ */
 
 /* ----------------------------------------------------- Helpers -------------------------------------------------------
@@ -239,22 +241,29 @@
  * ------------------------------------------------------------------------------------------------------------------ */
 
 #if CONFIG_FREERTOS_SMP
-    #ifdef CONFIG_FREERTOS_UNICORE
+    #if CONFIG_FREERTOS_UNICORE
         #define configNUM_CORES                  1
     #else
         #define configNUM_CORES                  2
     #endif /* CONFIG_FREERTOS_UNICORE */
     #define configUSE_CORE_AFFINITY              1
+    #define configNUMBER_OF_CORES                configNUM_CORES
     #define configRUN_MULTIPLE_PRIORITIES        1
-    #define configUSE_TASK_PREEMPTION_DISABLE    1
+    #if !CONFIG_FREERTOS_UNICORE
+        #define configUSE_TASK_PREEMPTION_DISABLE   1
+    #endif
 
 /* This is always enabled to call IDF style idle hooks, by can be "--Wl,--wrap"
  * if users enable CONFIG_FREERTOS_USE_MINIMAL_IDLE_HOOK. */
     #define configUSE_MINIMAL_IDLE_HOOK          1
+/* Provide newlib reentrancy macros */
+    #define configUSE_NEWLIB_REENTRANT              1
+    #define configTLS_BLOCK_TYPE                    struct _reent
+    #define configINIT_TLS_BLOCK( xTLSBlock )       esp_reent_init( &( xTLSBlock ) )
+/* We don't need to set the TLS block on context switches since we use __getreent for all newlib calls */
+    #define configSET_TLS_BLOCK( xTLSBlock )
+    #define configDEINIT_TLS_BLOCK( xTLSBlock )     _reclaim_reent( &( xTLSBlock ) )
 
-/* IDF Newlib supports dynamic reentrancy. We provide our own __getreent()
- * function. */
-    #define configNEWLIB_REENTRANT_IS_DYNAMIC    1
 #endif /* CONFIG_FREERTOS_SMP */
 
 /* -------------------------------------------------- IDF FreeRTOS -----------------------------------------------------

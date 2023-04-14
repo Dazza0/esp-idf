@@ -180,25 +180,47 @@ BaseType_t xPortSysTickHandler(void)
 
     // Call FreeRTOS Increment tick function
     BaseType_t xSwitchRequired;
-#if ( configNUM_CORES > 1 )
-    /*
-    For SMP, xTaskIncrementTick() will internally enter a critical section. But only core 0 calls xTaskIncrementTick()
-    while core 1 should call xTaskIncrementTickOtherCores().
-    */
-    if (xPortGetCoreID() == 0) {
-        xSwitchRequired = xTaskIncrementTick();
-    } else {
-        xSwitchRequired = xTaskIncrementTickOtherCores();
-    }
-#else // configNUM_CORES > 1
-    /*
-    Vanilla (single core) FreeRTOS expects that xTaskIncrementTick() cannot be interrupted (i.e., no nested interrupts).
-    Thus we have to disable interrupts before calling it.
-    */
-    UBaseType_t uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
-    xSwitchRequired = xTaskIncrementTick();
-    portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
-#endif
+    #if CONFIG_FREERTOS_SMP
+        // Amazon SMP FreeRTOS requires that only core 0 calls xTaskIncrementTick(), and that xTaskIncrementTick() be ca
+        /*
+        Amazon SMP FreeRTOS requires that only core 0 calls xTaskIncrementTick(), and that xTaskIncrementTick() be
+        called from an ISR critical section.
+        */
+        #if ( configNUM_CORES > 1 )
+            if (portGET_CORE_ID() == 0) {
+                UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+                xSwitchRequired = xTaskIncrementTick();
+                taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+            } else {
+                xSwitchRequired = pdFALSE;
+            }
+        #else /* configNUM_CORES > 1 */
+            UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+            xSwitchRequired = xTaskIncrementTick();
+            taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+        #endif /* configNUM_CORES > 1 */
+    #else /* !CONFIG_FREERTOS_SMP */
+        #if ( configNUM_CORES > 1 )
+            /*
+            Multi-core IDF FreeRTOS requires that...
+                - core 0 calls xTaskIncrementTick()
+                - core 1 calls xTaskIncrementTickOtherCores()
+            */
+            if (xPortGetCoreID() == 0) {
+                xSwitchRequired = xTaskIncrementTick();
+            } else {
+                xSwitchRequired = xTaskIncrementTickOtherCores();
+            }
+        #else /* configNUM_CORES > 1 */
+            /*
+            Vanilla (single core) FreeRTOS expects that xTaskIncrementTick() cannot be interrupted (i.e., no nested
+            interrupts). Thus we have to disable interrupts before calling it.
+            */
+            UBaseType_t uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+            xSwitchRequired = xTaskIncrementTick();
+            portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+        #endif /* configNUM_CORES > 1 */
+    #endif /* !CONFIG_FREERTOS_SMP */
 
     // Check if yield is required
     if (xSwitchRequired != pdFALSE) {

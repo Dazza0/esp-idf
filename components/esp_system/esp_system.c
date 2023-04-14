@@ -53,7 +53,7 @@ void esp_restart(void)
         }
     }
 
-#ifdef CONFIG_FREERTOS_SMP
+#if CONFIG_FREERTOS_SMP && !CONFIG_FREERTOS_UNICORE
     //Note: Scheduler suspension behavior changed in FreeRTOS SMP
     vTaskPreemptionDisable(NULL);
 #else

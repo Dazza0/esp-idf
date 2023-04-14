@@ -184,21 +184,26 @@ extern void vTaskExitCritical( void );
 #define portEXIT_CRITICAL(...)                      CHOOSE_MACRO_VA_ARG(portEXIT_CRITICAL_IDF, portEXIT_CRITICAL_SMP, ##__VA_ARGS__)(__VA_ARGS__)
 #endif
 
-#define portSET_INTERRUPT_MASK_FROM_ISR() ({ \
-    unsigned int cur_level; \
-    RSR(PS, cur_level); \
-    cur_level = (cur_level & XCHAL_PS_INTLEVEL_MASK) >> XCHAL_PS_INTLEVEL_SHIFT; \
-    vTaskEnterCritical(); \
-    cur_level; \
-})
-#define portCLEAR_INTERRUPT_MASK_FROM_ISR(x) ({ \
-    vTaskExitCritical(); \
-    portRESTORE_INTERRUPTS(x); \
-})
+#define portSET_INTERRUPT_MASK()                portDISABLE_INTERRUPTS()
+#define portSET_INTERRUPT_MASK_FROM_ISR()       portDISABLE_INTERRUPTS()
+#define portCLEAR_INTERRUPT_MASK(x)             portRESTORE_INTERRUPTS(x)
+#define portCLEAR_INTERRUPT_MASK_FROM_ISR(x)    portRESTORE_INTERRUPTS(x)
+
+extern UBaseType_t vTaskEnterCriticalFromISR( void );
+extern void vTaskExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus );
+#define portENTER_CRITICAL_FROM_ISR() vTaskEnterCriticalFromISR()
+#define portEXIT_CRITICAL_FROM_ISR(x) vTaskExitCriticalFromISR(x)
 
 // ---------------------- Yielding -------------------------
 
 #define portYIELD()                                 vPortYield()
+#if ( configNUMBER_OF_CORES == 1 )
+    // vTaskYieldWithinAPI is not provided in single core. Need to provide portYIELD_WITHIN_API() instead
+    #define portYIELD_WITHIN_API()                  esp_crosscore_int_send_yield(xPortGetCoreID())
+#else
+    // vTaskYieldWithinAPI IS provided. But we need to provide provide portYIELD_WITHIN_API() for other IDF components
+    #define portYIELD_WITHIN_API()                  vTaskYieldWithinAPI()
+#endif
 #if defined(__cplusplus) && (__cplusplus >  201703L)
 #define portYIELD_FROM_ISR(...)                     CHOOSE_MACRO_VA_ARG(portYIELD_FROM_ISR_CHECK, portYIELD_FROM_ISR_NO_CHECK __VA_OPT__(,) __VA_ARGS__)(__VA_ARGS__)
 #else
@@ -344,9 +349,6 @@ static inline bool IRAM_ATTR xPortCanYield(void)
 
     return ((ps_reg & PS_INTLEVEL_MASK) == 0);
 }
-
-// Added for backward compatibility with IDF
-#define portYIELD_WITHIN_API()                      vTaskYieldWithinAPI()
 
 // ----------------------- System --------------------------
 

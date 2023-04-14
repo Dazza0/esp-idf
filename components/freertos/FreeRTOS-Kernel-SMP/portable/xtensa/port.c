@@ -53,7 +53,7 @@ const DRAM_ATTR uint32_t offset_pxEndOfStack = offsetof(StaticTask_t, pxDummy8);
 const DRAM_ATTR uint32_t offset_cpsa = XT_CP_SIZE;  /* Offset to start of the CPSA area on the stack. See uxInitialiseStackCPSA(). */
 #if configNUM_CORES > 1
 /* Offset to TCB_t.uxCoreAffinityMask member. Used to pin unpinned tasks that use the FPU. */
-const DRAM_ATTR uint32_t offset_uxCoreAffinityMask = offsetof(StaticTask_t, uxDummy25);
+const DRAM_ATTR uint32_t offset_uxCoreAffinityMask = offsetof(StaticTask_t, uxDummy26);
 #if configUSE_CORE_AFFINITY != 1
 #error "configUSE_CORE_AFFINITY must be 1 on multicore targets with coprocessor support"
 #endif
@@ -708,7 +708,7 @@ void vPortCleanUpCoprocArea( void *pxTCB )
     uxCoprocArea = STACKPTR_ALIGN_DOWN(16, uxCoprocArea - XT_CP_SIZE);
 
     /* Extract core ID from the affinity mask */
-    xTargetCoreID = ( ( StaticTask_t * ) pxTCB )->uxDummy25 ;
+    xTargetCoreID = ( ( StaticTask_t * ) pxTCB )->uxDummy26 ;
     xTargetCoreID = ( BaseType_t ) __builtin_ffs( ( int ) xTargetCoreID );
     assert( xTargetCoreID >= 1 ); // __builtin_ffs always returns first set index + 1
     xTargetCoreID -= 1;
@@ -756,22 +756,66 @@ extern void esp_vApplicationTickHook(void);
 
 BaseType_t xPortSysTickHandler(void)
 {
+#if configBENCHMARK
     portbenchmarkIntLatency();
+#endif //configBENCHMARK
     traceISR_ENTER(SYSTICK_INTR_ID);
-    BaseType_t ret;
+
+    // Call IDF Tick Hook
+    extern void esp_vApplicationTickHook(void);
     esp_vApplicationTickHook();
-    if (portGET_CORE_ID() == 0) {
-        // FreeRTOS SMP requires that only core 0 calls xTaskIncrementTick()
-        ret = xTaskIncrementTick();
-    } else {
-        ret = pdFALSE;
-    }
-    if (ret != pdFALSE) {
+
+    // Call FreeRTOS Increment tick function
+    BaseType_t xSwitchRequired;
+    #if CONFIG_FREERTOS_SMP
+        // Amazon SMP FreeRTOS requires that only core 0 calls xTaskIncrementTick(), and that xTaskIncrementTick() be ca
+        /*
+        Amazon SMP FreeRTOS requires that only core 0 calls xTaskIncrementTick(), and that xTaskIncrementTick() be
+        called from an ISR critical section.
+        */
+        #if ( configNUM_CORES > 1 )
+            if (portGET_CORE_ID() == 0) {
+                UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+                xSwitchRequired = xTaskIncrementTick();
+                taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+            } else {
+                xSwitchRequired = pdFALSE;
+            }
+        #else /* configNUM_CORES > 1 */
+            UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+            xSwitchRequired = xTaskIncrementTick();
+            taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+        #endif /* configNUM_CORES > 1 */
+    #else /* !CONFIG_FREERTOS_SMP */
+        #if ( configNUM_CORES > 1 )
+            /*
+            Multi-core IDF FreeRTOS requires that...
+                - core 0 calls xTaskIncrementTick()
+                - core 1 calls xTaskIncrementTickOtherCores()
+            */
+            if (xPortGetCoreID() == 0) {
+                xSwitchRequired = xTaskIncrementTick();
+            } else {
+                xSwitchRequired = xTaskIncrementTickOtherCores();
+            }
+        #else /* configNUM_CORES > 1 */
+            /*
+            Vanilla (single core) FreeRTOS expects that xTaskIncrementTick() cannot be interrupted (i.e., no nested
+            interrupts). Thus we have to disable interrupts before calling it.
+            */
+            UBaseType_t uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+            xSwitchRequired = xTaskIncrementTick();
+            portCLEAR_INTERRUPT_MASK_FROM_ISR(uxSavedInterruptStatus);
+        #endif /* configNUM_CORES > 1 */
+    #endif /* !CONFIG_FREERTOS_SMP */
+
+    // Check if yield is required
+    if (xSwitchRequired != pdFALSE) {
         portYIELD_FROM_ISR();
     } else {
         traceISR_EXIT();
     }
-    return ret;
+    return xSwitchRequired;
 }
 
 // ------------------- Hook Functions ----------------------

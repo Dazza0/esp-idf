@@ -307,7 +307,9 @@ void vPortYield(void)
            for an instant yield, and if that happens then the WFI would be
            waiting for the next interrupt to occur...)
         */
-        while (uxSchedulerRunning && REG_READ(SYSTEM_CPU_INTR_FROM_CPU_0_REG) != 0) {}
+        for(int i = 0; i < 5; i++) {
+            ;
+        }
     }
 }
 

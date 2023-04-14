@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2022-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -130,7 +130,7 @@ Expected:
 static void unpinned_task(void *arg)
 {
     // Disable scheduling/preemption to make sure current core ID doesn't change
-#if CONFIG_FREERTOS_SMP
+#if CONFIG_FREERTOS_SMP && !CONFIG_FREERTOS_UNICORE
     vTaskPreemptionDisable(NULL);
 #else
     vTaskSuspendAll();
@@ -162,7 +162,7 @@ static void unpinned_task(void *arg)
     TEST_ASSERT_EQUAL(cur_core_num, xTaskGetAffinity(NULL));
 #endif
     // Reenable scheduling/preemption
-#if CONFIG_FREERTOS_SMP
+#if CONFIG_FREERTOS_SMP && !CONFIG_FREERTOS_UNICORE
     vTaskPreemptionEnable(NULL);
 #else
     xTaskResumeAll();

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2022-2023 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -7,7 +7,7 @@
     .global uxInterruptNesting
     .global uxSchedulerRunning
     .global xIsrStackTop
-    .global pxCurrentTCBs
+    .global pxCurrentTCB
     .global vTaskSwitchContext
     .global xPortSwitchFlag
 
@@ -41,7 +41,7 @@ rtos_int_enter:
 	bne t4,zero, rtos_enter_end
 
     /* Save current TCB and load the ISR stack */
-    lw  t0, pxCurrentTCBs
+    lw  t0, pxCurrentTCB
     sw 	t2, 0x0(t0)
     lw  sp, xIsrStackTop
 
@@ -97,7 +97,7 @@ isr_skip_decrement:
 
 no_switch:
     /* Recover the stack of next task and prepare to exit : */
-    lw a0, pxCurrentTCBs
+    lw a0, pxCurrentTCB
     lw a0, 0x0(a0)
 
 rtos_exit_end:

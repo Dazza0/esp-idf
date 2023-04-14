@@ -42,7 +42,11 @@ struct _reent *__getreent(void)
         ret = _GLOBAL_REENT;
     } else {
         // We have a task; return its reentrant struct.
-        ret = &pxCurTask->xNewLib_reent;
+        #if CONFIG_FREERTOS_SMP
+            ret = &pxCurTask->xTLSBlock;
+        #else
+            ret = &pxCurTask->xNewLib_reent;
+        #endif
     }
     return ret;
 }
@@ -343,7 +347,11 @@ TaskHandle_t xTaskGetCurrentTaskHandleForCPU( BaseType_t xCoreID )
     TaskHandle_t xTaskHandleTemp;
     assert(xCoreID >= 0 && xCoreID < configNUM_CORES);
     taskENTER_CRITICAL();
-    xTaskHandleTemp = (TaskHandle_t) pxCurrentTCBs[xCoreID];
+    #if ( configNUMBER_OF_CORES == 1 )
+        xTaskHandleTemp = (TaskHandle_t) pxCurrentTCB;
+    #else
+        xTaskHandleTemp = (TaskHandle_t) pxCurrentTCBs[xCoreID];
+    #endif
     taskEXIT_CRITICAL();
     return xTaskHandleTemp;
 }
@@ -351,7 +359,7 @@ TaskHandle_t xTaskGetCurrentTaskHandleForCPU( BaseType_t xCoreID )
 TaskHandle_t xTaskGetIdleTaskHandleForCPU( BaseType_t xCoreID )
 {
     assert(xCoreID >= 0 && xCoreID < configNUM_CORES);
-    return (TaskHandle_t) xIdleTaskHandle[xCoreID];
+    return (TaskHandle_t) xIdleTaskHandles[xCoreID];
 }
 
 BaseType_t xTaskGetAffinity( TaskHandle_t xTask )

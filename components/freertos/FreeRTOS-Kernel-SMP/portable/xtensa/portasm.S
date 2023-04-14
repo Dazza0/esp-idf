@@ -33,7 +33,15 @@
 
 #define TOPOFSTACK_OFFS                 0x00    /* StackType_t *pxTopOfStack */
 
-.extern pxCurrentTCBs
+/* Kernel declares pxCurrentTCB instead of pxCurrentTCBs when building for single core */
+#if ( configNUMBER_OF_CORES == 1 )
+    .extern pxCurrentTCB
+    #define PXCURRENTTCBS       pxCurrentTCB
+#else
+    .extern pxCurrentTCBs
+    #define PXCURRENTTCBS       pxCurrentTCBs
+#endif
+
 #if XCHAL_CP_NUM > 0
 /* Offsets used to get a task's coprocessor save area (CPSA) from its TCB */
 .extern offset_pxEndOfStack
@@ -148,7 +156,7 @@ _frxt_int_enter:
     s32i    a2,  a3, 0                  /* save nesting count              */
     bnei    a2,  1, .Lnested            /* !=0 before incr, so nested      */
 
-    movi    a2,  pxCurrentTCBs
+    movi    a2,  PXCURRENTTCBS
     addx4   a2,  a4, a2
     l32i    a2,  a2, 0                  /* a2 = current TCB                */
     beqz    a2,  1f
@@ -215,7 +223,7 @@ _frxt_int_exit:
     rsync                               /* ensure CPENABLE was modified */
     #endif
 
-    movi    a2,  pxCurrentTCBs
+    movi    a2,  PXCURRENTTCBS
     addx4   a2,  a4, a2
     l32i    a2,  a2, 0                  /* a2 = current TCB                */
     beqz    a2,  1f                     /* no task ? go to dispatcher      */
@@ -446,12 +454,12 @@ _frxt_dispatch:
     getcoreid   a2              // vTaskSwitchContext requires xCoreID as the first argument
     call0   vTaskSwitchContext  // Get next TCB to resume
     getcoreid a3                // Get xCoreID again because a2 wasn't preserved over the call
-    movi    a2, pxCurrentTCBs
+    movi    a2, PXCURRENTTCBS
     addx4   a2,  a3, a2
     #else
     getcoreid   a6              // vTaskSwitchContext requires xCoreID as the first argument
     call4   vTaskSwitchContext  // Get next TCB to resume
-    movi    a2, pxCurrentTCBs
+    movi    a2, PXCURRENTTCBS
     getcoreid a3                // Get xCoreID again because a6 wasn't preserved over the call
     addx4   a2,  a3, a2
     #endif
@@ -495,7 +503,7 @@ _frxt_dispatch:
 
     #if XCHAL_CP_NUM > 0
     /* Restore CPENABLE from task's co-processor save area. */
-    movi    a2, pxCurrentTCBs           /* cp_state =                       */
+    movi    a2, PXCURRENTTCBS           /* cp_state =                       */
     getcoreid a3
     addx4   a2, a3, a2
     l32i    a2, a2, 0
@@ -588,7 +596,7 @@ vPortYield:
     call0   _xt_coproc_savecs
     #endif
 
-    movi    a2,  pxCurrentTCBs
+    movi    a2,  PXCURRENTTCBS
     getcoreid a3
     addx4   a2,  a3, a2
     l32i    a2,  a2, 0                  /* a2 = pxCurrentTCBs                */
@@ -639,7 +647,7 @@ vPortYieldFromInt:
 
     #if XCHAL_CP_NUM > 0
     /* Save CPENABLE in task's co-processor save area, and clear CPENABLE.  */
-    movi    a2, pxCurrentTCBs           /* cp_state =                       */
+    movi    a2, PXCURRENTTCBS           /* cp_state =                       */
     getcoreid a3
     addx4   a2,  a3, a2
     l32i    a2, a2, 0
@@ -693,7 +701,7 @@ _frxt_task_coproc_state:
     l32i    a15, a15, 0
     bnez    a15, 1f
 
-    movi    a15, pxCurrentTCBs
+    movi    a15, PXCURRENTTCBS
     addx4   a15, a3, a15
     l32i    a15, a15, 0                 /* && pxCurrentTCBs != 0) {                 */
 
@@ -740,7 +748,7 @@ _frxt_coproc_exc_hook:
     bnez    a3, 1f                          /* We are in an interrupt. Return*/
     /* CP operations are incompatible with unpinned tasks. Thus we pin the task
     to the current running core by updating its TCB.uxCoreAffinityMask field. */
-    movi    a3, pxCurrentTCBs
+    movi    a3, PXCURRENTTCBS
     addx4   a3, a2, a3
     l32i    a3, a3, 0                       /* a3 = pxCurrentTCBs[xCurCoreID] */
     movi    a4, offset_uxCoreAffinityMask

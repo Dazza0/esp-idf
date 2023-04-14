@@ -184,6 +184,8 @@ extern void vTaskExitCritical( void );
 // ---------------------- Yielding -------------------------
 
 #define portYIELD()                                 vPortYield()
+// vTaskYieldWithinAPI is not provided in single core. Need to provide portYIELD_WITHIN_API() instead
+#define portYIELD_WITHIN_API()                      portYIELD()
 #if defined(__cplusplus) && (__cplusplus >  201703L)
 #define portYIELD_FROM_ISR(...)                     CHOOSE_MACRO_VA_ARG(portYIELD_FROM_ISR_CHECK, portYIELD_FROM_ISR_NO_CHECK __VA_OPT__(,) __VA_ARGS__)(__VA_ARGS__)
 #else
@@ -278,9 +280,6 @@ static inline bool IRAM_ATTR xPortCanYield(void)
      */
     return (threshold <= 1);
 }
-
-// Added for backward compatibility with IDF
-#define portYIELD_WITHIN_API()                      vTaskYieldWithinAPI()
 
 // ----------------------- System --------------------------
 
