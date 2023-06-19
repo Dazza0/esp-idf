@@ -61,6 +61,35 @@
     #define eventEVENT_BITS_CONTROL_BYTES    0xff000000UL
 #endif
 
+#if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+
+    #define eventENTER_CRITICAL( pxEventBits )                               taskENTER_CRITICAL()
+    #define eventEXIT_CRITICAL( pxEventBits )                                taskEXIT_CRITICAL()
+    #define eventENTER_CRITICAL_FROM_ISR( pxEventBits )                      taskENTER_CRITICAL_FROM_ISR()
+    #define eventEXIT_CRITICAL_FROM_ISR( pxEventBits, uxInterruptStatus )    taskEXIT_CRITICAL_FROM_ISR( uxInterruptStatus )
+
+#elif ( FREERTOS_CRIT_IMPL == 4 )
+
+    void vTaskEnterCriticalWithLock( portSPINLOCK_TYPE * pxLock );
+    UBaseType_t vTaskEnterCriticalFromISRWithLock( portSPINLOCK_TYPE * pxLock );
+    void vTaskExitCriticalWithLock( portSPINLOCK_TYPE * pxLock );
+    void vTaskExitCriticalWithLockFromISR( portSPINLOCK_TYPE * pxLock,
+                                           UBaseType_t uxSavedInterruptStatus );
+
+    #define eventENTER_CRITICAL( pxEventBits )                               vTaskEnterCriticalWithLock( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventEXIT_CRITICAL( pxEventBits )                                vTaskExitCriticalWithLock( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventENTER_CRITICAL_FROM_ISR( pxEventBits )                      vTaskEnterCriticalFromISRWithLock( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventEXIT_CRITICAL_FROM_ISR( pxEventBits, uxInterruptStatus )    vTaskExitCriticalWithLockFromISR( &( ( pxEventBits )->xEventGroupLock ), ( uxInterruptStatus ) )
+
+#else /* ( FREERTOS_CRIT_IMPL == 5 ) */
+
+    #define eventENTER_CRITICAL( pxEventBits )                               portENTER_CRITICAL_WITH_LOCK( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventEXIT_CRITICAL( pxEventBits )                                portEXIT_CRITICAL_WITH_LOCK( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventENTER_CRITICAL_FROM_ISR( pxEventBits )                      portENTER_CRITICAL_WITH_LOCK_FROM_ISR( &( ( pxEventBits )->xEventGroupLock ) )
+    #define eventEXIT_CRITICAL_FROM_ISR( pxEventBits, uxInterruptStatus )    portEXIT_CRITICAL_WITH_LOCK_FROM_ISR( &( ( pxEventBits )->xEventGroupLock ), ( uxInterruptStatus ) )
+
+#endif /* FREERTOS_CRIT_IMPL */
+
 typedef struct EventGroupDef_t
 {
     EventBits_t uxEventBits;
@@ -73,6 +102,10 @@ typedef struct EventGroupDef_t
     #if ( ( configSUPPORT_STATIC_ALLOCATION == 1 ) && ( configSUPPORT_DYNAMIC_ALLOCATION == 1 ) )
         uint8_t ucStaticallyAllocated; /*< Set to pdTRUE if the event group is statically allocated to ensure no attempt is made to free the memory. */
     #endif
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        portSPINLOCK_TYPE xEventGroupLock;
+    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 } EventGroup_t;
 
 /*-----------------------------------------------------------*/
@@ -127,6 +160,11 @@ static BaseType_t prvTestWaitCondition( const EventBits_t uxCurrentEventBits,
             }
             #endif /* configSUPPORT_DYNAMIC_ALLOCATION */
 
+            /* Initialize the spinlock for this event group if granular locking is used */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                portSPINLOCK_EVENT_GROUP_INIT( &( pxEventBits->xEventGroupLock ) );
+            #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
+
             traceEVENT_GROUP_CREATE( pxEventBits );
         }
         else
@@ -178,6 +216,11 @@ static BaseType_t prvTestWaitCondition( const EventBits_t uxCurrentEventBits,
             }
             #endif /* configSUPPORT_STATIC_ALLOCATION */
 
+            /* Initialize the spinlock for this event group if granular locking is used */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                portSPINLOCK_EVENT_GROUP_INIT( &( pxEventBits->xEventGroupLock ) );
+            #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
+
             traceEVENT_GROUP_CREATE( pxEventBits );
         }
         else
@@ -209,7 +252,13 @@ EventBits_t xEventGroupSync( EventGroupHandle_t xEventGroup,
     }
     #endif
 
-    vTaskSuspendAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Dropping determinism requirement for granular locks. Simply use
+         * a critical section. */
+        eventENTER_CRITICAL( pxEventBits );
+    #else
+        vTaskSuspendAll();
+    #endif
     {
         uxOriginalBitValue = pxEventBits->uxEventBits;
 
@@ -252,7 +301,12 @@ EventBits_t xEventGroupSync( EventGroupHandle_t xEventGroup,
             }
         }
     }
-    xAlreadyYielded = xTaskResumeAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        eventEXIT_CRITICAL( pxEventBits );
+        xAlreadyYielded = pdFALSE;
+    #else
+        xAlreadyYielded = xTaskResumeAll();
+    #endif
 
     if( xTicksToWait != ( TickType_t ) 0 )
     {
@@ -282,7 +336,7 @@ EventBits_t xEventGroupSync( EventGroupHandle_t xEventGroup,
         if( ( uxReturn & eventUNBLOCKED_DUE_TO_BIT_SET ) == ( EventBits_t ) 0 )
         {
             /* The task timed out, just return the current event bit value. */
-            taskENTER_CRITICAL();
+            eventENTER_CRITICAL( pxEventBits );
             {
                 uxReturn = pxEventBits->uxEventBits;
 
@@ -299,7 +353,7 @@ EventBits_t xEventGroupSync( EventGroupHandle_t xEventGroup,
                     mtCOVERAGE_TEST_MARKER();
                 }
             }
-            taskEXIT_CRITICAL();
+            eventEXIT_CRITICAL( pxEventBits );
 
             xTimeoutOccurred = pdTRUE;
         }
@@ -344,7 +398,13 @@ EventBits_t xEventGroupWaitBits( EventGroupHandle_t xEventGroup,
     }
     #endif
 
-    vTaskSuspendAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Dropping determinism requirement for granular locks. Simply use
+         * a critical section. */
+        eventENTER_CRITICAL( pxEventBits );
+    #else
+        vTaskSuspendAll();
+    #endif
     {
         const EventBits_t uxCurrentEventBits = pxEventBits->uxEventBits;
 
@@ -412,7 +472,12 @@ EventBits_t xEventGroupWaitBits( EventGroupHandle_t xEventGroup,
             traceEVENT_GROUP_WAIT_BITS_BLOCK( xEventGroup, uxBitsToWaitFor );
         }
     }
-    xAlreadyYielded = xTaskResumeAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        eventEXIT_CRITICAL( pxEventBits );
+        xAlreadyYielded = pdFALSE;
+    #else
+        xAlreadyYielded = xTaskResumeAll();
+    #endif
 
     if( xTicksToWait != ( TickType_t ) 0 )
     {
@@ -441,7 +506,7 @@ EventBits_t xEventGroupWaitBits( EventGroupHandle_t xEventGroup,
 
         if( ( uxReturn & eventUNBLOCKED_DUE_TO_BIT_SET ) == ( EventBits_t ) 0 )
         {
-            taskENTER_CRITICAL();
+            eventENTER_CRITICAL( pxEventBits );
             {
                 /* The task timed out, just return the current event bit value. */
                 uxReturn = pxEventBits->uxEventBits;
@@ -466,7 +531,7 @@ EventBits_t xEventGroupWaitBits( EventGroupHandle_t xEventGroup,
 
                 xTimeoutOccurred = pdTRUE;
             }
-            taskEXIT_CRITICAL();
+            eventEXIT_CRITICAL( pxEventBits );
         }
         else
         {
@@ -497,7 +562,7 @@ EventBits_t xEventGroupClearBits( EventGroupHandle_t xEventGroup,
     configASSERT( xEventGroup );
     configASSERT( ( uxBitsToClear & eventEVENT_BITS_CONTROL_BYTES ) == 0 );
 
-    taskENTER_CRITICAL();
+    eventENTER_CRITICAL( pxEventBits );
     {
         traceEVENT_GROUP_CLEAR_BITS( xEventGroup, uxBitsToClear );
 
@@ -508,7 +573,7 @@ EventBits_t xEventGroupClearBits( EventGroupHandle_t xEventGroup,
         /* Clear the bits. */
         pxEventBits->uxEventBits &= ~uxBitsToClear;
     }
-    taskEXIT_CRITICAL();
+    eventEXIT_CRITICAL( pxEventBits );
 
     return uxReturn;
 }
@@ -536,11 +601,11 @@ EventBits_t xEventGroupGetBitsFromISR( EventGroupHandle_t xEventGroup )
     EventGroup_t const * const pxEventBits = xEventGroup;
     EventBits_t uxReturn;
 
-    uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+    uxSavedInterruptStatus = eventENTER_CRITICAL_FROM_ISR( ( ( EventGroup_t * ) pxEventBits ) );
     {
         uxReturn = pxEventBits->uxEventBits;
     }
-    taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
+    eventEXIT_CRITICAL_FROM_ISR( ( ( EventGroup_t * ) pxEventBits ), uxSavedInterruptStatus );
 
     return uxReturn;
 } /*lint !e818 EventGroupHandle_t is a typedef used in other functions to so can't be pointer to const. */
@@ -564,7 +629,16 @@ EventBits_t xEventGroupSetBits( EventGroupHandle_t xEventGroup,
 
     pxList = &( pxEventBits->xTasksWaitingForBits );
     pxListEnd = listGET_END_MARKER( pxList ); /*lint !e826 !e740 !e9087 The mini list structure is used as the list end to save RAM.  This is checked and valid. */
-    vTaskSuspendAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Dropping determinism requirement for granular locks. Simply use
+         * a critical section. */
+        eventENTER_CRITICAL( pxEventBits );
+        /* We are about to traverse a task list which is a kernel data structure.
+         * Thus we need to call vTaskTakeKernelLock() to take the kernel lock. */
+        vTaskKernelLock();
+    #else
+        vTaskSuspendAll();
+    #endif
     {
         traceEVENT_GROUP_SET_BITS( xEventGroup, uxBitsToSet );
 
@@ -636,7 +710,13 @@ EventBits_t xEventGroupSetBits( EventGroupHandle_t xEventGroup,
          * bit was set in the control word. */
         pxEventBits->uxEventBits &= ~uxBitsToClear;
     }
-    ( void ) xTaskResumeAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Release the previously taken kernel lock. */
+        vTaskKernelUnlock();
+        eventEXIT_CRITICAL( pxEventBits );
+    #else
+        ( void ) xTaskResumeAll();
+    #endif
 
     return pxEventBits->uxEventBits;
 }
@@ -651,7 +731,16 @@ void vEventGroupDelete( EventGroupHandle_t xEventGroup )
 
     pxTasksWaitingForBits = &( pxEventBits->xTasksWaitingForBits );
 
-    vTaskSuspendAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Dropping determinism requirement for granular locks. Simply use
+         * a critical section. */
+        eventENTER_CRITICAL( pxEventBits );
+        /* We are about to traverse a task list which is a kernel data structure.
+         * Thus we need to call vTaskTakeKernelLock() to take the kernel lock. */
+        vTaskKernelLock();
+    #else
+        vTaskSuspendAll();
+    #endif
     {
         traceEVENT_GROUP_DELETE( xEventGroup );
 
@@ -663,7 +752,13 @@ void vEventGroupDelete( EventGroupHandle_t xEventGroup )
             vTaskRemoveFromUnorderedEventList( pxTasksWaitingForBits->xListEnd.pxNext, eventUNBLOCKED_DUE_TO_BIT_SET );
         }
     }
-    ( void ) xTaskResumeAll();
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Release the previously taken kernel lock. */
+        vTaskKernelUnlock();
+        eventEXIT_CRITICAL( pxEventBits );
+    #else
+        ( void ) xTaskResumeAll();
+    #endif
 
     #if ( ( configSUPPORT_DYNAMIC_ALLOCATION == 1 ) && ( configSUPPORT_STATIC_ALLOCATION == 0 ) )
     {

@@ -302,6 +302,10 @@
     #define portCRITICAL_NESTING_IN_TCB    0
 #endif
 
+#ifndef portGRANULAR_LOCKING
+    #define portGRANULAR_LOCKING            0
+#endif
+
 #ifndef configMAX_TASK_NAME_LEN
     #define configMAX_TASK_NAME_LEN    16
 #endif
@@ -385,46 +389,6 @@
 
 #endif /* portCLEAR_INTERRUPT_MASK */
 
-#ifndef portRELEASE_TASK_LOCK
-
-    #if ( configNUMBER_OF_CORES == 1 )
-        #define portRELEASE_TASK_LOCK()
-    #else
-        #error portRELEASE_TASK_LOCK is required in SMP
-    #endif
-
-#endif /* portRELEASE_TASK_LOCK */
-
-#ifndef portGET_TASK_LOCK
-
-    #if ( configNUMBER_OF_CORES == 1 )
-        #define portGET_TASK_LOCK()
-    #else
-        #error portGET_TASK_LOCK is required in SMP
-    #endif
-
-#endif /* portGET_TASK_LOCK */
-
-#ifndef portRELEASE_ISR_LOCK
-
-    #if ( configNUMBER_OF_CORES == 1 )
-        #define portRELEASE_ISR_LOCK()
-    #else
-        #error portRELEASE_ISR_LOCK is required in SMP
-    #endif
-
-#endif /* portRELEASE_ISR_LOCK */
-
-#ifndef portGET_ISR_LOCK
-
-    #if ( configNUMBER_OF_CORES == 1 )
-        #define portGET_ISR_LOCK()
-    #else
-        #error portGET_ISR_LOCK is required in SMP
-    #endif
-
-#endif /* portGET_ISR_LOCK */
-
 #ifndef portCHECK_IF_IN_ISR
 
     #if ( configNUMBER_OF_CORES > 1 )
@@ -433,9 +397,94 @@
 
 #endif /* portCHECK_IF_IN_ISR */
 
+#ifndef FREERTOS_CRIT_IMPL
+
+    /*
+    FREERTOS_CRIT_IMPL = 0
+        - Single core critical sections (i.e., interrupt disable). Critical nesting in TCB
+
+    FREERTOS_CRIT_IMPL = 1
+        - Single core critical sections (i.e., interrupt disable). Critical nesting in port
+
+    FREERTOS_CRIT_IMPL = 2
+        - SMP critical sections, big kernel lock (i.e., global task and ISR lock). Critical nesting in TCB
+
+    FREERTOS_CRIT_IMPL = 3
+        - SMP critical sections, big kernel lock (i.e., global task and ISR lock). Critical nesting in port
+
+    FREERTOS_CRIT_IMPL = 4
+        - SMP critical sections, granular locking (i.e., lock per data group). Critical nesting in TCB
+
+    FREERTOS_CRIT_IMPL = 5
+        - SMP critical sections, granular locking (i.e., lock per data group). Critical nesting in port
+    */
+    #if ( configNUMBER_OF_CORES == 1 )
+        #if ( portCRITICAL_NESTING_IN_TCB == 1 )
+            #define FREERTOS_CRIT_IMPL  0
+        #else
+            #define FREERTOS_CRIT_IMPL  1
+        #endif /* portCRITICAL_NESTING_IN_TCB == 1 */
+    #else /* configNUMBER_OF_CORES == 1 */
+        #if ( portGRANULAR_LOCKING == 0 )
+            #if ( portCRITICAL_NESTING_IN_TCB == 1 )
+                #define FREERTOS_CRIT_IMPL  2
+            #else
+                #define FREERTOS_CRIT_IMPL  3
+            #endif
+        #else /* portGRANULAR_LOCKING == 1 */
+            #if ( portCRITICAL_NESTING_IN_TCB == 1 )
+                #define FREERTOS_CRIT_IMPL  4
+            #else
+                #define FREERTOS_CRIT_IMPL  5
+            #endif
+        #endif /* portGRANULAR_LOCKING */
+    #endif
+
+#endif /* FREERTOS_LOCK_IMPL */
+
+#ifndef portRELEASE_TASK_LOCK
+
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+        #error portRELEASE_TASK_LOCK is required in SMP if portGRANULAR_LOCKING == 0
+    #else
+        #define portRELEASE_TASK_LOCK()
+    #endif
+
+#endif /* portRELEASE_TASK_LOCK */
+
+#ifndef portGET_TASK_LOCK
+
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+        #error portGET_TASK_LOCK is required in SMP if portGRANULAR_LOCKING == 0
+    #else
+        #define portGET_TASK_LOCK()
+    #endif
+
+#endif /* portGET_TASK_LOCK */
+
+#ifndef portRELEASE_ISR_LOCK
+
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+        #error portRELEASE_ISR_LOCK is required in SMP if portGRANULAR_LOCKING == 0
+    #else
+        #define portRELEASE_ISR_LOCK()
+    #endif
+
+#endif /* portRELEASE_ISR_LOCK */
+
+#ifndef portGET_ISR_LOCK
+
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+        #error portGET_ISR_LOCK is required in SMP if portGRANULAR_LOCKING == 0
+    #else
+        #define portGET_ISR_LOCK()
+    #endif
+
+#endif /* portGET_ISR_LOCK */
+
 #ifndef portENTER_CRITICAL_FROM_ISR
 
-    #if ( configNUMBER_OF_CORES > 1 )
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
         #error portENTER_CRITICAL_FROM_ISR is required in SMP
     #endif
 
@@ -443,8 +492,73 @@
 
 #ifndef portEXIT_CRITICAL_FROM_ISR
 
-    #if ( configNUMBER_OF_CORES > 1 )
+    #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
         #error portEXIT_CRITICAL_FROM_ISR is required in SMP
+    #endif
+
+#endif
+
+/* Granular locking */
+#if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+    #ifndef portSPINLOCK_TYPE
+        #error portSPINLOCK_TYPE is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_EVENT_GROUP_INIT
+        #error portSPINLOCK_EVENT_GROUP_INIT is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_QUEUE_INIT
+        #error portSPINLOCK_QUEUE_INIT is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_STREAM_BUFFER_INIT
+        #error portSPINLOCK_STREAM_BUFFER_INIT is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_KERNEL_TASK_INIT_STATIC
+        #error portSPINLOCK_KERNEL_TASK_INIT_STATIC is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_KERNEL_ISR_INIT_STATIC
+        #error portSPINLOCK_KERNEL_ISR_INIT_STATIC is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_TIMER_INIT_STATIC
+        #error portSPINLOCK_TIMER_INIT_STATIC is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portSPINLOCK_USER_INIT_STATIC
+        #error portSPINLOCK_USER_INIT_STATIC is required in portGRANULAR_LOCKING == 1
+    #endif
+
+    #ifndef portTAKE_LOCK
+        #error portTAKE_LOCK is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 1
+    #endif
+
+    #ifndef portRELEASE_LOCK
+        #error portRELEASE_LOCK is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 1
+    #endif
+#endif /* ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) */
+
+/* Granular locking with nesting in port */
+#if ( FREERTOS_CRIT_IMPL == 5 )
+
+    #ifndef portENTER_CRITICAL_WITH_LOCK
+        #error portENTER_CRITICAL_WITH_LOCK is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 0
+    #endif
+
+    #ifndef portEXIT_CRITICAL_WITH_LOCK
+        #error portEXIT_CRITICAL_WITH_LOCK is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 0
+    #endif
+
+    #ifndef portENTER_CRITICAL_WITH_LOCK_FROM_ISR
+        #error portENTER_CRITICAL_WITH_LOCK_FROM_ISR is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 0
+    #endif
+
+    #ifndef portEXIT_CRITICAL_WITH_LOCK_FROM_ISR
+        #error portEXIT_CRITICAL_WITH_LOCK_FROM_ISR is required in SMP if portGRANULAR_LOCKING == 1 && portCRITICAL_NESTING_IN_TCB == 0
     #endif
 
 #endif
@@ -1478,6 +1592,10 @@ typedef struct xSTATIC_QUEUE
         UBaseType_t uxDummy8;
         uint8_t ucDummy9;
     #endif
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        portSPINLOCK_TYPE xDummyLock;
+    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 } StaticQueue_t;
 typedef StaticQueue_t StaticSemaphore_t;
 
@@ -1507,6 +1625,10 @@ typedef struct xSTATIC_EVENT_GROUP
     #if ( ( configSUPPORT_STATIC_ALLOCATION == 1 ) && ( configSUPPORT_DYNAMIC_ALLOCATION == 1 ) )
         uint8_t ucDummy4;
     #endif
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        portSPINLOCK_TYPE xDummyLock;
+    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 } StaticEventGroup_t;
 
 /*
@@ -1561,6 +1683,10 @@ typedef struct xSTATIC_STREAM_BUFFER
     #if ( configUSE_SB_COMPLETED_CALLBACK == 1 )
         void * pvDummy5[ 2 ];
     #endif
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        portSPINLOCK_TYPE xStreamBufferLock;
+    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 } StaticStreamBuffer_t;
 
 /* Message buffers are built on stream buffers. */

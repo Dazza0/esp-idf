@@ -71,6 +71,50 @@
     #endif
 #endif
 
+#if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+
+    #define kernelENTER_CRITICAL()               taskENTER_CRITICAL()
+    #define kernelEXIT_CRITICAL()                taskEXIT_CRITICAL()
+    #define kernelENTER_CRITICAL_FROM_ISR()      taskENTER_CRITICAL_FROM_ISR()
+    #define kernelEXIT_CRITICAL_FROM_ISR( x )    taskEXIT_CRITICAL_FROM_ISR( x )
+
+#elif ( FREERTOS_CRIT_IMPL == 4 )
+
+    #define kernelENTER_CRITICAL()               prvKernelEnterCritical()
+    #define kernelEXIT_CRITICAL()                prvKernelExitCritical()
+    #define kernelENTER_CRITICAL_FROM_ISR()      prvKernelEnterCriticalFromISR()
+    #define kernelEXIT_CRITICAL_FROM_ISR( x )    prvKernelExitCriticalFromISR( ( x ) )
+
+#else /* ( FREERTOS_CRIT_IMPL == 5 ) */
+
+    #define kernelENTER_CRITICAL()                        \
+    {                                                     \
+        portENTER_CRITICAL_WITH_LOCK( &xKernelTaskLock ); \
+        portENTER_CRITICAL_WITH_LOCK( &xKernelISRLock );  \
+    }
+
+    #define kernelEXIT_CRITICAL()                        \
+    {                                                    \
+        portEXIT_CRITICAL_WITH_LOCK( &xKernelISRLock );  \
+        portEXIT_CRITICAL_WITH_LOCK( &xKernelTaskLock ); \
+    }
+
+/* Use GCC statement expression as we need to return uxSavedInterruptStatus */
+    #define kernelENTER_CRITICAL_FROM_ISR()                                            \
+    ( {                                                                                \
+        UBaseType_t uxInterruptStatus;                                                 \
+        uxInterruptStatus = portENTER_CRITICAL_WITH_LOCK_FROM_ISR( &xKernelISRLock );  \
+        uxInterruptStatus;                                                             \
+    } )
+
+/* uxInterruptStatus is only restored when exiting the last nested call */
+    #define kernelEXIT_CRITICAL_FROM_ISR( uxInterruptStatus )                            \
+    {                                                                                    \
+        portEXIT_CRITICAL_WITH_LOCK_FROM_ISR( &xKernelISRLock, ( uxInterruptStatus ) );  \
+    }
+
+#endif /* FREERTOS_CRIT_IMPL */
+
 /* Values that can be assigned to the ucNotifyState member of the TCB. */
 #define taskNOT_WAITING_NOTIFICATION              ( ( uint8_t ) 0 ) /* Must be zero as it is the initialised value. */
 #define taskWAITING_NOTIFICATION                  ( ( uint8_t ) 1 )
@@ -469,6 +513,14 @@ PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended = ( UBaseType_t
 
 #endif
 
+#if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+    PRIVILEGED_DATA static portSPINLOCK_TYPE xKernelTaskLock = portSPINLOCK_KERNEL_TASK_INIT_STATIC;
+    PRIVILEGED_DATA static portSPINLOCK_TYPE xKernelISRLock = portSPINLOCK_KERNEL_ISR_INIT_STATIC;
+    PRIVILEGED_DATA portSPINLOCK_TYPE xUserLock = portSPINLOCK_USER_INIT_STATIC;
+
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
+
 /*lint -restore */
 
 /*-----------------------------------------------------------*/
@@ -480,14 +532,20 @@ PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended = ( UBaseType_t
  */
 static BaseType_t prvCreateIdleTasks( void );
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
 
 /*
  * Checks to see if another task moved the current task out of the ready
  * list while it was waiting to enter a critical section and yields, if so.
  */
     static void prvCheckForRunStateChange( void );
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+
+#elif ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+/* Checks to see if a vTaskSuspendAll() is pending a yield, and yields if so. */
+    static void prvCheckSuspendAllStateChange( void );
+
+#endif /* FREERTOS_CRIT_IMPL */
 
 #if ( configNUMBER_OF_CORES > 1 )
 
@@ -668,6 +726,13 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
  */
 static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
+#if ( FREERTOS_CRIT_IMPL == 4 )
+    void prvKernelEnterCritical( void );
+    UBaseType_t prvKernelEnterCriticalFromISR( void );
+    void prvKernelExitCritical( void );
+    void prvKernelExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus );
+#endif
+
 /*
  * freertos_tasks_c_additions_init() should only be called if the user definable
  * macro FREERTOS_TASKS_C_ADDITIONS_INIT() is defined, as that is the only macro
@@ -681,7 +746,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
     static void prvCheckForRunStateChange( void )
     {
         UBaseType_t uxPrevCriticalNesting;
@@ -755,7 +820,41 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
             }
         }
     }
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+#elif ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+    /* In granular locking, this function is only ever called from
+     * vTaskSuspendAll(), thus can be made shorter by excluding some checks. */
+
+    static void prvCheckSuspendAllStateChange( void )
+    {
+        TCB_t * pxThisTCB;
+
+        /* This function is always called on the first vTaskSuspendAll() call
+         * where interrupts are disabled and xKernelTaskLock has been taken. So
+         * the following is safe. */
+
+        pxThisTCB = pxCurrentTCBs[ portGET_CORE_ID() ];
+
+        while( pxThisTCB->xTaskRunState == taskTASK_YIELDING )
+        {
+            configASSERT( uxSchedulerSuspended == 1U );
+            uxSchedulerSuspended = 0U;
+
+            portRELEASE_LOCK( &xKernelTaskLock );
+            portMEMORY_BARRIER();
+            configASSERT( pxThisTCB->xTaskRunState == taskTASK_YIELDING );
+            portENABLE_INTERRUPTS();
+
+            /* Enabling interrupts should cause this core to immediately
+             * service the pending interrupt and yield. If the run state is still
+             * yielding here then that is a problem. */
+            configASSERT( pxThisTCB->xTaskRunState != taskTASK_YIELDING );
+
+            portDISABLE_INTERRUPTS();
+            portTAKE_LOCK( &xKernelTaskLock );
+            uxSchedulerSuspended = 1U;
+        }
+    }
+#endif /* FREERTOS_CRIT_IMPL */
 
 /*-----------------------------------------------------------*/
 
@@ -1696,7 +1795,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     {
         /* Ensure interrupts don't access the task lists while the lists are being
          * updated. */
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             uxCurrentNumberOfTasks++;
 
@@ -1754,7 +1853,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
             portSETUP_TCB( pxNewTCB );
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         if( xSchedulerRunning != pdFALSE )
         {
@@ -1781,7 +1880,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     {
         /* Ensure interrupts don't access the task lists while the lists are being
          * updated. */
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             uxCurrentNumberOfTasks++;
 
@@ -1852,7 +1951,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
 #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
@@ -1864,7 +1963,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     {
         TCB_t * pxTCB;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* If null is passed in here then it is the calling task that is
              * being deleted. */
@@ -1945,7 +2044,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
         #if ( configNUMBER_OF_CORES == 1 )
         {
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
 
             /* If the task is not deleting itself, call prvDeleteTCB from outside of
              * critical section. If a task deletes itself, prvDeleteTCB is called
@@ -1994,7 +2093,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 }
             }
 
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
         }
         #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
     }
@@ -2013,13 +2112,18 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         configASSERT( pxPreviousWakeTime );
         configASSERT( ( xTimeIncrement > 0U ) );
 
-        vTaskSuspendAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Dropping determinism requirement for granular locks. Simply
+             * use a critical section. */
+            kernelENTER_CRITICAL();
+        #else
+            vTaskSuspendAll();
+            configASSERT( uxSchedulerSuspended == 1 );
+        #endif
         {
             /* Minor optimisation.  The tick count cannot change in this
              * block. */
             const TickType_t xConstTickCount = xTickCount;
-
-            configASSERT( uxSchedulerSuspended == 1 );
 
             /* Generate the tick time at which the task wants to wake. */
             xTimeToWake = *pxPreviousWakeTime + xTimeIncrement;
@@ -2071,7 +2175,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        xAlreadyYielded = xTaskResumeAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            kernelEXIT_CRITICAL();
+            xAlreadyYielded = pdFALSE;
+        #else
+            xAlreadyYielded = xTaskResumeAll();
+        #endif
 
         /* Force a reschedule if xTaskResumeAll has not already done so, we may
          * have put ourselves to sleep. */
@@ -2103,9 +2212,15 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         /* A delay time of zero just forces a reschedule. */
         if( xTicksToDelay > ( TickType_t ) 0U )
         {
-            vTaskSuspendAll();
-            {
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                /* Dropping determinism requirement for granular locks. Simply
+                 * use a critical section. */
+                kernelENTER_CRITICAL();
+            #else
+                vTaskSuspendAll();
                 configASSERT( uxSchedulerSuspended == 1 );
+            #endif
+            {
 
                 traceTASK_DELAY();
 
@@ -2118,7 +2233,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * executing task. */
                 prvAddCurrentTaskToDelayedList( xTicksToDelay, pdFALSE );
             }
-            xAlreadyYielded = xTaskResumeAll();
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                kernelEXIT_CRITICAL();
+                xAlreadyYielded = pdFALSE;
+            #else
+                xAlreadyYielded = xTaskResumeAll();
+            #endif
         }
         else
         {
@@ -2165,13 +2285,13 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             else
         #endif
         {
-            taskENTER_CRITICAL();
+            kernelENTER_CRITICAL();
             {
                 pxStateList = listLIST_ITEM_CONTAINER( &( pxTCB->xStateListItem ) );
                 pxDelayedList = pxDelayedTaskList;
                 pxOverflowedDelayedList = pxOverflowDelayedTaskList;
             }
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
 
             if( ( pxStateList == pxDelayedList ) || ( pxStateList == pxOverflowedDelayedList ) )
             {
@@ -2270,14 +2390,14 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         TCB_t const * pxTCB;
         UBaseType_t uxReturn;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* If null is passed in here then it is the priority of the task
              * that called uxTaskPriorityGet() that is being queried. */
             pxTCB = prvGetTCBFromHandle( xTask );
             uxReturn = pxTCB->uxPriority;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return uxReturn;
     }
@@ -2310,14 +2430,14 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
          * https://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html */
         portASSERT_IF_INTERRUPT_PRIORITY_INVALID();
 
-        uxSavedInterruptState = taskENTER_CRITICAL_FROM_ISR();
+        uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
         {
             /* If null is passed in here then it is the priority of the calling
              * task that is being queried. */
             pxTCB = prvGetTCBFromHandle( xTask );
             uxReturn = pxTCB->uxPriority;
         }
-        taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
 
         return uxReturn;
     }
@@ -2350,7 +2470,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             mtCOVERAGE_TEST_MARKER();
         }
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* If null is passed in here then it is the priority of the calling
              * task that is being changed. */
@@ -2538,7 +2658,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 ( void ) uxPriorityUsedOnEntry;
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
 #endif /* INCLUDE_vTaskPrioritySet */
@@ -2556,7 +2676,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             UBaseType_t uxPrevNotAllowedCores;
         #endif
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             pxTCB = prvGetTCBFromHandle( xTask );
 
@@ -2600,7 +2720,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 }
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 #endif /* #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) ) */
 /*-----------------------------------------------------------*/
@@ -2611,12 +2731,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         TCB_t * pxTCB;
         UBaseType_t uxCoreAffinityMask;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             pxTCB = prvGetTCBFromHandle( xTask );
             uxCoreAffinityMask = pxTCB->uxCoreAffinityMask;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return uxCoreAffinityMask;
     }
@@ -2630,13 +2750,13 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     {
         TCB_t * pxTCB;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             pxTCB = prvGetTCBFromHandle( xTask );
 
             pxTCB->xPreemptionDisable = pdTRUE;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
 #endif /* #if ( configUSE_TASK_PREEMPTION_DISABLE == 1 ) */
@@ -2649,7 +2769,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         TCB_t * pxTCB;
         BaseType_t xCoreID;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             pxTCB = prvGetTCBFromHandle( xTask );
 
@@ -2664,7 +2784,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 }
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
 #endif /* #if ( configUSE_TASK_PREEMPTION_DISABLE == 1 ) */
@@ -2680,7 +2800,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             TaskRunning_t xTaskRunningOnCore;
         #endif
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* If null is passed in here then it is the running task that is
              * being suspended. */
@@ -2734,17 +2854,17 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
         #if ( configNUMBER_OF_CORES == 1 )
         {
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
 
             if( xSchedulerRunning != pdFALSE )
             {
                 /* Reset the next expected unblock time in case it referred to the
                  * task that is now in the Suspended state. */
-                taskENTER_CRITICAL();
+                kernelENTER_CRITICAL();
                 {
                     prvResetNextTaskUnblockTime();
                 }
-                taskEXIT_CRITICAL();
+                kernelEXIT_CRITICAL();
             }
             else
             {
@@ -2826,7 +2946,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 mtCOVERAGE_TEST_MARKER();
             }
 
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
         }
         #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
     }
@@ -2904,7 +3024,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             if( pxTCB != NULL )
         #endif
         {
-            taskENTER_CRITICAL();
+            kernelENTER_CRITICAL();
             {
                 if( prvTaskIsTaskSuspended( pxTCB ) != pdFALSE )
                 {
@@ -2945,7 +3065,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     mtCOVERAGE_TEST_MARKER();
                 }
             }
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
         }
         else
         {
@@ -2985,7 +3105,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
          * https://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html */
         portASSERT_IF_INTERRUPT_PRIORITY_INVALID();
 
-        uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+        uxSavedInterruptStatus = kernelENTER_CRITICAL_FROM_ISR();
         {
             if( prvTaskIsTaskSuspended( pxTCB ) != pdFALSE )
             {
@@ -3041,7 +3161,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
+        kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
 
         return xYieldRequired;
     }
@@ -3364,19 +3484,32 @@ void vTaskSuspendAll( void )
              * do not otherwise exhibit real time behaviour. */
             portSOFTWARE_BARRIER();
 
-            portGET_TASK_LOCK();
-            portGET_ISR_LOCK();
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                portTAKE_LOCK( &xKernelTaskLock );
+                portTAKE_LOCK( &xKernelISRLock );
+            #else
+                portGET_TASK_LOCK();
+                portGET_ISR_LOCK();
+            #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
             /* The scheduler is suspended if uxSchedulerSuspended is non-zero.  An increment
              * is used to allow calls to vTaskSuspendAll() to nest. */
             ++uxSchedulerSuspended;
-            portRELEASE_ISR_LOCK();
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                portRELEASE_LOCK( &xKernelISRLock );
+            #else
+                portRELEASE_ISR_LOCK();
+            #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
             if( uxSchedulerSuspended == 1U )
             {
                 if( portGET_CRITICAL_NESTING_COUNT() == 0U )
                 {
-                    prvCheckForRunStateChange();
+                    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                        prvCheckSuspendAllStateChange();
+                    #else
+                        prvCheckForRunStateChange();
+                    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
                 }
                 else
                 {
@@ -3477,7 +3610,7 @@ BaseType_t xTaskResumeAll( void )
          * removed task will have been added to the xPendingReadyList.  Once the
          * scheduler has been resumed it is safe to move all the pending ready
          * tasks from this list into their appropriate ready list. */
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             BaseType_t xCoreID;
             xCoreID = portGET_CORE_ID();
@@ -3487,7 +3620,11 @@ BaseType_t xTaskResumeAll( void )
             configASSERT( uxSchedulerSuspended != 0U );
 
             --uxSchedulerSuspended;
-            portRELEASE_TASK_LOCK();
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                portRELEASE_LOCK( &xKernelTaskLock );
+            #else
+                portRELEASE_TASK_LOCK();
+            #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
             if( uxSchedulerSuspended == ( UBaseType_t ) pdFALSE )
             {
@@ -3599,7 +3736,7 @@ BaseType_t xTaskResumeAll( void )
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
     return xAlreadyYielded;
@@ -3611,11 +3748,11 @@ TickType_t xTaskGetTickCount( void )
     TickType_t xTicks;
 
     /* Critical section required if running on a 16 bit processor. */
-    portTICK_TYPE_ENTER_CRITICAL();
+    kernelENTER_CRITICAL();
     {
         xTicks = xTickCount;
     }
-    portTICK_TYPE_EXIT_CRITICAL();
+    kernelEXIT_CRITICAL();
 
     return xTicks;
 }
@@ -3753,7 +3890,13 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery ) /*lint !e971 Unqualified char 
         /* Task names will be truncated to configMAX_TASK_NAME_LEN - 1 bytes. */
         configASSERT( strlen( pcNameToQuery ) < configMAX_TASK_NAME_LEN );
 
-        vTaskSuspendAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Dropping determinism requirement for granular locks. Simply
+                * use a critical section. */
+            kernelENTER_CRITICAL();
+        #else
+            vTaskSuspendAll();
+        #endif
         {
             /* Search the ready lists. */
             do
@@ -3799,7 +3942,11 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery ) /*lint !e971 Unqualified char 
             }
             #endif
         }
-        ( void ) xTaskResumeAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            kernelEXIT_CRITICAL();
+        #else
+            ( void ) xTaskResumeAll();
+        #endif
 
         return pxTCB;
     }
@@ -3862,7 +4009,13 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery ) /*lint !e971 Unqualified char 
     {
         UBaseType_t uxTask = 0, uxQueue = configMAX_PRIORITIES;
 
-        vTaskSuspendAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Dropping determinism requirement for granular locks. Simply
+             * use a critical section. */
+            kernelENTER_CRITICAL();
+        #else
+            vTaskSuspendAll();
+        #endif
         {
             /* Is there a space in the array for each task in the system? */
             if( uxArraySize >= uxCurrentNumberOfTasks )
@@ -3921,7 +4074,12 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery ) /*lint !e971 Unqualified char 
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        ( void ) xTaskResumeAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            kernelEXIT_CRITICAL();
+        #else
+            ( void ) xTaskResumeAll();
+        #endif
+
 
         return uxTask;
     }
@@ -3966,11 +4124,11 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery ) /*lint !e971 Unqualified char 
             configASSERT( xTicksToJump != ( TickType_t ) 0 );
 
             /* Prevent the tick interrupt modifying xPendedTicks simultaneously. */
-            taskENTER_CRITICAL();
+            kernelENTER_CRITICAL();
             {
                 xPendedTicks++;
             }
-            taskEXIT_CRITICAL();
+            kernelEXIT_CRITICAL();
             xTicksToJump--;
         }
         else
@@ -3998,11 +4156,11 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
     vTaskSuspendAll();
 
     /* Prevent the tick interrupt modifying xPendedTicks simultaneously. */
-    taskENTER_CRITICAL();
+    kernelENTER_CRITICAL();
     {
         xPendedTicks += xTicksToCatchUp;
     }
-    taskEXIT_CRITICAL();
+    kernelEXIT_CRITICAL();
     xYieldOccurred = xTaskResumeAll();
 
     return xYieldOccurred;
@@ -4018,7 +4176,13 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
 
         configASSERT( pxTCB );
 
-        vTaskSuspendAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Dropping determinism requirement for granular locks. Simply
+             * use a critical section. */
+            kernelENTER_CRITICAL();
+        #else
+            vTaskSuspendAll();
+        #endif
         {
             /* A task can only be prematurely removed from the Blocked state if
              * it is actually in the Blocked state. */
@@ -4035,7 +4199,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
                  * the event list too.  Interrupts can touch the event list item,
                  * even though the scheduler is suspended, so a critical section
                  * is used. */
-                taskENTER_CRITICAL();
+                kernelENTER_CRITICAL();
                 {
                     if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
                     {
@@ -4051,7 +4215,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
                         mtCOVERAGE_TEST_MARKER();
                     }
                 }
-                taskEXIT_CRITICAL();
+                kernelEXIT_CRITICAL();
 
                 /* Place the unblocked task into the appropriate ready list. */
                 prvAddTaskToReadyList( pxTCB );
@@ -4078,11 +4242,11 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
                     }
                     #else /* #if ( configNUMBER_OF_CORES == 1 ) */
                     {
-                        taskENTER_CRITICAL();
+                        kernelENTER_CRITICAL();
                         {
                             prvYieldForTask( pxTCB );
                         }
-                        taskEXIT_CRITICAL();
+                        kernelEXIT_CRITICAL();
                     }
                     #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
                 }
@@ -4093,7 +4257,11 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
                 xReturn = pdFAIL;
             }
         }
-        ( void ) xTaskResumeAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            kernelEXIT_CRITICAL();
+        #else
+            ( void ) xTaskResumeAll();
+        #endif
 
         return xReturn;
     }
@@ -4116,6 +4284,22 @@ BaseType_t xTaskIncrementTick( void )
      * Increments the tick then checks to see if the new tick value will cause any
      * tasks to be unblocked. */
     traceTASK_INCREMENT_TICK( xTickCount );
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        UBaseType_t uxSavedInterruptState;
+        /* With granular locks, we need a critical section as we are about to
+         * access the kernel data group. xTaskIncrementTick() can be called from
+         * vTaskSuspendAll(). */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #endif
 
     /* Tick increment should occur on every kernel timer event. Core 0 has the
      * responsibility to increment the tick, or increment the pended ticks if the
@@ -4342,6 +4526,18 @@ BaseType_t xTaskIncrementTick( void )
         }
         #endif
     }
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* If using granular locks, we need to release the spinlocks of the
+         * kernel data group by entering a kernel critical section. */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            kernelEXIT_CRITICAL();
+        }
+        else
+        {
+            kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        }
+    #endif
 
     return xSwitchRequired;
 }
@@ -4367,11 +4563,11 @@ BaseType_t xTaskIncrementTick( void )
 
         /* Save the hook function in the TCB.  A critical section is required as
          * the value can be accessed from an interrupt. */
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             xTCB->pxTaskTag = pxHookFunction;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
     }
 
 #endif /* configUSE_APPLICATION_TASK_TAG */
@@ -4389,11 +4585,11 @@ BaseType_t xTaskIncrementTick( void )
 
         /* Save the hook function in the TCB.  A critical section is required as
          * the value can be accessed from an interrupt. */
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             xReturn = pxTCB->pxTaskTag;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return xReturn;
     }
@@ -4414,11 +4610,11 @@ BaseType_t xTaskIncrementTick( void )
 
         /* Save the hook function in the TCB.  A critical section is required as
          * the value can be accessed from an interrupt. */
-        uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+        uxSavedInterruptStatus = kernelENTER_CRITICAL_FROM_ISR();
         {
             xReturn = pxTCB->pxTaskTag;
         }
-        taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
+        kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
 
         return xReturn;
     }
@@ -4543,8 +4739,13 @@ BaseType_t xTaskIncrementTick( void )
          *   and move on if another core suspended the scheduler. We should only
          *   do that if the current core has suspended the scheduler. */
 
-        portGET_TASK_LOCK(); /* Must always acquire the task lock first. */
-        portGET_ISR_LOCK();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            portTAKE_LOCK( &xKernelTaskLock );
+            portTAKE_LOCK( &xKernelISRLock );
+        #else
+            portGET_TASK_LOCK(); /* Must always acquire the task lock first. */
+            portGET_ISR_LOCK();
+        #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
         {
             /* vTaskSwitchContext() must never be called from within a critical section.
              * This is not necessarily true for single core FreeRTOS, but it is for this
@@ -4620,8 +4821,13 @@ BaseType_t xTaskIncrementTick( void )
                 #endif
             }
         }
-        portRELEASE_ISR_LOCK();
-        portRELEASE_TASK_LOCK();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            portRELEASE_LOCK( &xKernelISRLock );
+            portRELEASE_LOCK( &xKernelTaskLock );
+        #else
+            portRELEASE_ISR_LOCK();
+            portRELEASE_TASK_LOCK();
+        #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
     }
 #endif /* if ( configNUMBER_OF_CORES > 1 ) */
 /*-----------------------------------------------------------*/
@@ -4631,8 +4837,24 @@ void vTaskPlaceOnEventList( List_t * const pxEventList,
 {
     configASSERT( pxEventList );
 
-    /* THIS FUNCTION MUST BE CALLED WITH EITHER INTERRUPTS DISABLED OR THE
-     * SCHEDULER SUSPENDED AND THE QUEUE BEING ACCESSED LOCKED. */
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* This function is called in a nested critical (i.e., locks of the
+         * caller's data group already taken). We now need to take the kernel
+         * data group's locks as we are going to modify the task lists. */
+        UBaseType_t uxSavedInterruptState;
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #else
+        /* THIS FUNCTION MUST BE CALLED WITH EITHER INTERRUPTS DISABLED OR THE
+         * SCHEDULER SUSPENDED AND THE QUEUE BEING ACCESSED LOCKED. */
+    #endif
 
     /* Place the event list item of the TCB in the appropriate event list.
      * This is placed in the list in priority order so the highest priority task
@@ -4648,6 +4870,19 @@ void vTaskPlaceOnEventList( List_t * const pxEventList,
     vListInsert( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
     prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* If using granular locks, we need to release the spinlocks of the
+         * kernel data group by entering a kernel critical section. */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            kernelEXIT_CRITICAL();
+        }
+        else
+        {
+            kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        }
+    #endif
 }
 /*-----------------------------------------------------------*/
 
@@ -4657,9 +4892,26 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
 {
     configASSERT( pxEventList );
 
-    /* THIS FUNCTION MUST BE CALLED WITH THE SCHEDULER SUSPENDED.  It is used by
-     * the event groups implementation. */
-    configASSERT( uxSchedulerSuspended != 0 );
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+        /* THIS FUNCTION MUST BE CALLED WITH THE SCHEDULER SUSPENDED.  It is used by
+         * the event groups implementation. */
+        configASSERT( uxSchedulerSuspended != 0 );
+    #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+        /* This function is called in a nested critical (i.e., locks of the
+         * caller's data group already taken). We now need to take the kernel
+         * data group's locks as we are going to modify the task lists. */
+        UBaseType_t uxSavedInterruptState;
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #endif /* FREERTOS_CRIT_IMPL */
+
 
     /* Store the item value in the event list item.  It is safe to access the
      * event list item here as interrupts won't access the event list item of a
@@ -4674,6 +4926,19 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
     listINSERT_END( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
     prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* If using granular locks, we need to release the spinlocks of the
+         * kernel data group by entering a kernel critical section. */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            kernelEXIT_CRITICAL();
+        }
+        else
+        {
+            kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        }
+    #endif
 }
 /*-----------------------------------------------------------*/
 
@@ -4684,6 +4949,22 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
                                           const BaseType_t xWaitIndefinitely )
     {
         configASSERT( pxEventList );
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* This function is called in a nested critical (i.e., locks of the
+         * caller's data group already taken). We now need to take the kernel
+         * data group's locks as we are going to modify the task lists. */
+        UBaseType_t uxSavedInterruptState;
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #endif
 
         /* This function should not be called by application code hence the
          * 'Restricted' in its name.  It is not part of the public API.  It is
@@ -4707,6 +4988,19 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
 
         traceTASK_DELAY_UNTIL( ( xTickCount + xTicksToWait ) );
         prvAddCurrentTaskToDelayedList( xTicksToWait, xWaitIndefinitely );
+
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* If using granular locks, we need to release the spinlocks of the
+             * kernel data group by entering a kernel critical section. */
+            if( portCHECK_IF_IN_ISR() == pdFALSE )
+            {
+                kernelEXIT_CRITICAL();
+            }
+            else
+            {
+                kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+            }
+        #endif
     }
 
 #endif /* configUSE_TIMERS */
@@ -4717,8 +5011,24 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
     TCB_t * pxUnblockedTCB;
     BaseType_t xReturn;
 
-    /* THIS FUNCTION MUST BE CALLED FROM A CRITICAL SECTION.  It can also be
-     * called from a critical section within an ISR. */
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* This function is called in a nested critical (i.e., locks of the
+         * caller's data group already taken). We now need to take the kernel
+         * data group's locks as we are going to modify the task lists. */
+        UBaseType_t uxSavedInterruptState;
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #else
+        /* THIS FUNCTION MUST BE CALLED FROM A CRITICAL SECTION.  It can also be
+         * called from a critical section within an ISR. */
+    #endif
 
     /* The event list is sorted in priority order, so the first in the list can
      * be removed as it is known to be the highest priority.  Remove the TCB from
@@ -4795,6 +5105,19 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
     }
     #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
 
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* If using granular locks, we need to release the spinlocks of the
+         * kernel data group by entering a kernel critical section. */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            kernelEXIT_CRITICAL();
+        }
+        else
+        {
+            kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        }
+    #endif
+
     return xReturn;
 }
 /*-----------------------------------------------------------*/
@@ -4804,9 +5127,25 @@ void vTaskRemoveFromUnorderedEventList( ListItem_t * pxEventListItem,
 {
     TCB_t * pxUnblockedTCB;
 
-    /* THIS FUNCTION MUST BE CALLED WITH THE SCHEDULER SUSPENDED.  It is used by
-     * the event flags implementation. */
-    configASSERT( uxSchedulerSuspended != pdFALSE );
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+        /* THIS FUNCTION MUST BE CALLED WITH THE SCHEDULER SUSPENDED.  It is used by
+         * the event flags implementation. */
+        configASSERT( uxSchedulerSuspended != pdFALSE );
+    #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+        /* This function is called in a nested critical (i.e., locks of the
+         * caller's data group already taken). We now need to take the kernel
+         * data group's locks as we are going to modify the task lists. */
+        UBaseType_t uxSavedInterruptState;
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            uxSavedInterruptState = 0;
+            kernelENTER_CRITICAL();
+        }
+        else
+        {
+            uxSavedInterruptState = kernelENTER_CRITICAL_FROM_ISR();
+        }
+    #endif /* FREERTOS_CRIT_IMPL */
 
     /* Store the new item value in the event list. */
     listSET_LIST_ITEM_VALUE( pxEventListItem, xItemValue | taskEVENT_LIST_ITEM_VALUE_IN_USE );
@@ -4852,27 +5191,48 @@ void vTaskRemoveFromUnorderedEventList( ListItem_t * pxEventListItem,
     {
         #if ( configUSE_PREEMPTION == 1 )
         {
-            taskENTER_CRITICAL();
+            #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+                /* If not using granular locks, we haven't entered a critical
+                 * section at this pointer. Enter it so we can safely yield. */
+                kernelENTER_CRITICAL();
+            #endif
             {
                 prvYieldForTask( pxUnblockedTCB );
             }
-            taskEXIT_CRITICAL();
+            #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+                /* If not using granular locks, we haven't entered a critical
+                 * section at this pointer. Enter it so we can safely yield. */
+                kernelEXIT_CRITICAL();
+            #endif
         }
         #endif
     }
     #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* If using granular locks, we need to release the spinlocks of the
+         * kernel data group by entering a kernel critical section. */
+        if( portCHECK_IF_IN_ISR() == pdFALSE )
+        {
+            kernelEXIT_CRITICAL();
+        }
+        else
+        {
+            kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptState );
+        }
+    #endif
 }
 /*-----------------------------------------------------------*/
 
 void vTaskSetTimeOutState( TimeOut_t * const pxTimeOut )
 {
     configASSERT( pxTimeOut );
-    taskENTER_CRITICAL();
+    kernelENTER_CRITICAL();
     {
         pxTimeOut->xOverflowCount = xNumOfOverflows;
         pxTimeOut->xTimeOnEntering = xTickCount;
     }
-    taskEXIT_CRITICAL();
+    kernelEXIT_CRITICAL();
 }
 /*-----------------------------------------------------------*/
 
@@ -4892,7 +5252,7 @@ BaseType_t xTaskCheckForTimeOut( TimeOut_t * const pxTimeOut,
     configASSERT( pxTimeOut );
     configASSERT( pxTicksToWait );
 
-    taskENTER_CRITICAL();
+    kernelENTER_CRITICAL();
     {
         /* Minor optimisation.  The tick count cannot change in this block. */
         const TickType_t xConstTickCount = xTickCount;
@@ -4943,7 +5303,7 @@ BaseType_t xTaskCheckForTimeOut( TimeOut_t * const pxTimeOut,
             xReturn = pdTRUE;
         }
     }
-    taskEXIT_CRITICAL();
+    kernelEXIT_CRITICAL();
 
     return xReturn;
 }
@@ -5378,13 +5738,13 @@ static void prvCheckTasksWaitingTermination( void )
     {
         TCB_t * pxTCB;
 
-        /* uxDeletedTasksWaitingCleanUp is used to prevent taskENTER_CRITICAL()
+        /* uxDeletedTasksWaitingCleanUp is used to prevent kernelENTER_CRITICAL()
          * being called too often in the idle task. */
         while( uxDeletedTasksWaitingCleanUp > ( UBaseType_t ) 0U )
         {
             #if ( configNUMBER_OF_CORES == 1 )
             {
-                taskENTER_CRITICAL();
+                kernelENTER_CRITICAL();
                 {
                     {
                         pxTCB = listGET_OWNER_OF_HEAD_ENTRY( ( &xTasksWaitingTermination ) ); /*lint !e9079 void * is used as this macro is used with timers too.  Alignment is known to be fine as the type of the pointer stored and retrieved is the same. */
@@ -5393,7 +5753,7 @@ static void prvCheckTasksWaitingTermination( void )
                         --uxDeletedTasksWaitingCleanUp;
                     }
                 }
-                taskEXIT_CRITICAL();
+                kernelEXIT_CRITICAL();
 
                 prvDeleteTCB( pxTCB );
             }
@@ -5401,7 +5761,7 @@ static void prvCheckTasksWaitingTermination( void )
             {
                 pxTCB = NULL;
 
-                taskENTER_CRITICAL();
+                kernelENTER_CRITICAL();
                 {
                     /* For SMP, multiple idles can be running simultaneously
                      * and we need to check that other idles did not cleanup while we were
@@ -5421,12 +5781,12 @@ static void prvCheckTasksWaitingTermination( void )
                             /* The TCB to be deleted still has not yet been switched out
                              * by the scheduler, so we will just exit this loop early and
                              * try again next time. */
-                            taskEXIT_CRITICAL();
+                            kernelEXIT_CRITICAL();
                             break;
                         }
                     }
                 }
-                taskEXIT_CRITICAL();
+                kernelEXIT_CRITICAL();
 
                 if( pxTCB != NULL )
                 {
@@ -5508,14 +5868,24 @@ static void prvCheckTasksWaitingTermination( void )
                      *  it should be reported as being in the Blocked state. */
                     if( eState == eSuspended )
                     {
-                        vTaskSuspendAll();
+                        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                            /* Dropping determinism requirement for granular locks. Simply
+                             * use a critical section. */
+                            kernelENTER_CRITICAL();
+                        #else
+                            vTaskSuspendAll();
+                        #endif
                         {
                             if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
                             {
                                 pxTaskStatus->eCurrentState = eBlocked;
                             }
                         }
-                        ( void ) xTaskResumeAll();
+                        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                            kernelEXIT_CRITICAL();
+                        #else
+                            ( void ) xTaskResumeAll();
+                        #endif
                     }
                 }
                 #endif /* INCLUDE_vTaskSuspend */
@@ -5807,7 +6177,7 @@ static void prvResetNextTaskUnblockTime( void )
         else
         {
             #if ( configNUMBER_OF_CORES > 1 )
-                taskENTER_CRITICAL();
+                kernelENTER_CRITICAL();
             #endif
             {
                 if( uxSchedulerSuspended == ( UBaseType_t ) pdFALSE )
@@ -5820,7 +6190,7 @@ static void prvResetNextTaskUnblockTime( void )
                 }
             }
             #if ( configNUMBER_OF_CORES > 1 )
-                taskEXIT_CRITICAL();
+                kernelEXIT_CRITICAL();
             #endif
         }
 
@@ -6127,7 +6497,305 @@ static void prvResetNextTaskUnblockTime( void )
 
 /*-----------------------------------------------------------*/
 
-#if ( ( portCRITICAL_NESTING_IN_TCB == 1 ) && ( configNUMBER_OF_CORES == 1 ) )
+#if ( FREERTOS_CRIT_IMPL == 4 )
+
+    void prvKernelEnterCritical( void )
+    {
+        portDISABLE_INTERRUPTS();
+
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* We could be nesting across differnt locks, so we always take the
+            * locks. It is up to portTAKE_LOCK() and portSPINLOCK_TYPE to track
+            * the number of nested portTAKE_LOCK() for each individual lock. */
+            portTAKE_LOCK( &xKernelTaskLock );
+            portTAKE_LOCK( &xKernelISRLock );
+
+            portINCREMENT_CRITICAL_NESTING_COUNT();
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+    UBaseType_t prvKernelEnterCriticalFromISR( void )
+    {
+        UBaseType_t uxSavedInterruptStatus = 0;
+
+        if( xSchedulerRunning != pdFALSE )
+        {
+            uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+
+            /* We could be nesting across differnt locks, so we always take the
+            * locks. It is up to portTAKE_LOCK() and portSPINLOCK_TYPE to track
+            * the number of nested portTAKE_LOCK() for each individual lock. */
+            portTAKE_LOCK( &xKernelISRLock );
+
+            portINCREMENT_CRITICAL_NESTING_COUNT();
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+
+        return uxSavedInterruptStatus;
+    }
+
+    void prvKernelExitCritical( void )
+    {
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* If critical nesting count is zero then this function
+             * does not match a previous call to vTaskEnterCritical(). */
+            configASSERT( portGET_CRITICAL_NESTING_COUNT() > 0U );
+
+            /* This function should not be called in ISR. Use vTaskExitCriticalFromISR
+             * to exit critical section from ISR. */
+            portASSERT_IF_IN_ISR();
+
+            if( portGET_CRITICAL_NESTING_COUNT() > 0U )
+            {
+                portDECREMENT_CRITICAL_NESTING_COUNT();
+
+                /* We could be nesting across differnt locks, so we always
+                 * relase the locks. It is up to portRELEASE_LOCK() and
+                 * portSPINLOCK_TYPE to track the number of nested
+                 * portRELEASE_LOCK() for each individual lock. */
+                portRELEASE_LOCK( &xKernelISRLock );
+                portRELEASE_LOCK( &xKernelTaskLock );
+
+                /* If this is the outermost nested call, reenable interrupts and
+                 * yield if necessary. */
+                if( portGET_CRITICAL_NESTING_COUNT() == 0U )
+                {
+                    BaseType_t xYieldCurrentTask;
+
+                    /* Get the xYieldPending stats inside the critical section. */
+                    xYieldCurrentTask = xYieldPendings[ portGET_CORE_ID() ];
+
+                    portENABLE_INTERRUPTS();
+
+                    /* When a task yields in a critical section it just sets
+                     * xYieldPending to true. So now that we have exited the
+                     * critical section check if xYieldPending is true, and
+                     * if so yield. */
+                    if( xYieldCurrentTask != pdFALSE )
+                    {
+                        portYIELD();
+                    }
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+    void prvKernelExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus )
+    {
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* If critical nesting count is zero then this function
+             * does not match a previous call to vTaskEnterCritical(). */
+            configASSERT( portGET_CRITICAL_NESTING_COUNT() > 0U );
+
+            if( portGET_CRITICAL_NESTING_COUNT() > 0U )
+            {
+                portDECREMENT_CRITICAL_NESTING_COUNT();
+
+                /* We could be nesting across differnt locks, so we always
+                 * relase the locks. It is up to portRELEASE_LOCK() and
+                 * portSPINLOCK_TYPE to track the number of nested
+                 * portRELEASE_LOCK() for each individual lock. */
+                portRELEASE_LOCK( &xKernelISRLock );
+
+                /* If this is the outermost nested call, restore saved interrupt status */
+                if( portGET_CRITICAL_NESTING_COUNT() == 0U )
+                {
+                    portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+    void vTaskEnterCriticalWithLock( portSPINLOCK_TYPE * pxLock )
+    {
+        portDISABLE_INTERRUPTS();
+
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* We could be nesting across differnt locks, so we always take the
+            * locks. It is up to portTAKE_LOCK() and portSPINLOCK_TYPE to track
+            * the number of nested portTAKE_LOCK() for each individual lock. */
+            portTAKE_LOCK( pxLock );
+
+            portINCREMENT_CRITICAL_NESTING_COUNT();
+
+            /* This is not the interrupt safe version of the enter critical
+             * function so  assert() if it is being called from an interrupt
+             * context.  Only API functions that end in "FromISR" can be used in an
+             * interrupt.  Only assert if the critical nesting count is 1 to
+             * protect against recursive calls if the assert function also uses a
+             * critical section. */
+            if( portGET_CRITICAL_NESTING_COUNT() == 1U )
+            {
+                portASSERT_IF_IN_ISR();
+            }
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+    UBaseType_t vTaskEnterCriticalFromISRWithLock( portSPINLOCK_TYPE * pxLock )
+    {
+        UBaseType_t uxSavedInterruptStatus = 0;
+
+        if( xSchedulerRunning != pdFALSE )
+        {
+            uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+
+            /* We could be nesting across differnt locks, so we always take the
+            * locks. It is up to portTAKE_LOCK() and portSPINLOCK_TYPE to track
+            * the number of nested portTAKE_LOCK() for each individual lock. */
+            portTAKE_LOCK( pxLock );
+
+            portINCREMENT_CRITICAL_NESTING_COUNT();
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+
+        return uxSavedInterruptStatus;
+    }
+
+    void vTaskExitCriticalWithLock( portSPINLOCK_TYPE * pxLock )
+    {
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* If critical nesting count is zero then this function
+             * does not match a previous call to vTaskEnterCritical(). */
+            configASSERT( portGET_CRITICAL_NESTING_COUNT() > 0U );
+
+            /* This function should not be called in ISR. Use vTaskExitCriticalFromISR
+             * to exit critical section from ISR. */
+            portASSERT_IF_IN_ISR();
+
+            if( portGET_CRITICAL_NESTING_COUNT() > 0U )
+            {
+                portDECREMENT_CRITICAL_NESTING_COUNT();
+
+                /* We could be nesting across differnt locks, so we always
+                 * relase the locks. It is up to portRELEASE_LOCK() and
+                 * portSPINLOCK_TYPE to track the number of nested
+                 * portRELEASE_LOCK() for each individual lock. */
+                portRELEASE_LOCK( pxLock );
+
+                /* If this is the outermost nested call, reenable interrupts and
+                 * yield if necessary. */
+                if( portGET_CRITICAL_NESTING_COUNT() == 0U )
+                {
+                    BaseType_t xYieldCurrentTask;
+
+                    /* Get the xYieldPending stats inside the critical section. */
+                    xYieldCurrentTask = xYieldPendings[ portGET_CORE_ID() ];
+
+                    portENABLE_INTERRUPTS();
+
+                    /* When a task yields in a critical section it just sets
+                     * xYieldPending to true. So now that we have exited the
+                     * critical section check if xYieldPending is true, and
+                     * if so yield. */
+                    if( xYieldCurrentTask != pdFALSE )
+                    {
+                        portYIELD();
+                    }
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+    void vTaskExitCriticalWithLockFromISR( portSPINLOCK_TYPE * pxLock,
+                                           UBaseType_t uxSavedInterruptStatus )
+    {
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* If critical nesting count is zero then this function
+             * does not match a previous call to vTaskEnterCritical(). */
+            configASSERT( portGET_CRITICAL_NESTING_COUNT() > 0U );
+
+            if( portGET_CRITICAL_NESTING_COUNT() > 0U )
+            {
+                portDECREMENT_CRITICAL_NESTING_COUNT();
+
+                /* We could be nesting across differnt locks, so we always
+                 * relase the locks. It is up to portRELEASE_LOCK() and
+                 * portSPINLOCK_TYPE to track the number of nested
+                 * portRELEASE_LOCK() for each individual lock. */
+                portRELEASE_LOCK( pxLock );
+
+                /* If this is the outermost nested call, restore saved interrupt status */
+                if( portGET_CRITICAL_NESTING_COUNT() == 0U )
+                {
+                    portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+        else
+        {
+            mtCOVERAGE_TEST_MARKER();
+        }
+    }
+
+#endif /* #if ( FREERTOS_CRIT_IMPL == 4 ) */
+
+/*-----------------------------------------------------------*/
+
+#if ( FREERTOS_CRIT_IMPL == 0 )
 
     void vTaskEnterCritical( void )
     {
@@ -6154,10 +6822,10 @@ static void prvResetNextTaskUnblockTime( void )
         }
     }
 
-#endif /* #if ( ( portCRITICAL_NESTING_IN_TCB == 1 ) && ( configNUMBER_OF_CORES == 1 ) ) */
+#endif /* #if ( FREERTOS_CRIT_IMPL == 0 ) */
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
 
     void vTaskEnterCritical( void )
     {
@@ -6199,11 +6867,11 @@ static void prvResetNextTaskUnblockTime( void )
         }
     }
 
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) ) */
 
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
 
     UBaseType_t vTaskEnterCriticalFromISR( void )
     {
@@ -6228,10 +6896,10 @@ static void prvResetNextTaskUnblockTime( void )
         return uxSavedInterruptStatus;
     }
 
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) ) */
 /*-----------------------------------------------------------*/
 
-#if ( ( portCRITICAL_NESTING_IN_TCB == 1 ) && ( configNUMBER_OF_CORES == 1 ) )
+#if ( FREERTOS_CRIT_IMPL == 0 )
 
     void vTaskExitCritical( void )
     {
@@ -6269,10 +6937,10 @@ static void prvResetNextTaskUnblockTime( void )
         }
     }
 
-#endif /* #if ( ( portCRITICAL_NESTING_IN_TCB == 1 ) && ( configNUMBER_OF_CORES == 1 ) ) */
+#endif /* #if ( FREERTOS_CRIT_IMPL == 0 ) */
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
 
     void vTaskExitCritical( void )
     {
@@ -6326,10 +6994,10 @@ static void prvResetNextTaskUnblockTime( void )
         }
     }
 
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) ) */
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES > 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
 
     void vTaskExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus )
     {
@@ -6378,7 +7046,7 @@ static void prvResetNextTaskUnblockTime( void )
         }
     }
 
-#endif /* #if ( configNUMBER_OF_CORES > 1 ) */
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) ) */
 /*-----------------------------------------------------------*/
 
 #if ( configUSE_STATS_FORMATTING_FUNCTIONS > 0 )
@@ -6676,7 +7344,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
         configASSERT( uxIndexToWait < configTASK_NOTIFICATION_ARRAY_ENTRIES );
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* Only block if the notification count is not already non-zero. */
             if( pxCurrentTCB->ulNotifiedValue[ uxIndexToWait ] == 0UL )
@@ -6713,9 +7381,9 @@ TickType_t uxTaskResetEventItemValue( void )
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             traceTASK_NOTIFY_TAKE( uxIndexToWait );
             ulReturn = pxCurrentTCB->ulNotifiedValue[ uxIndexToWait ];
@@ -6738,7 +7406,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
             pxCurrentTCB->ucNotifyState[ uxIndexToWait ] = taskNOT_WAITING_NOTIFICATION;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return ulReturn;
     }
@@ -6758,7 +7426,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
         configASSERT( uxIndexToWait < configTASK_NOTIFICATION_ARRAY_ENTRIES );
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* Only block if a notification is not already pending. */
             if( pxCurrentTCB->ucNotifyState[ uxIndexToWait ] != taskNOTIFICATION_RECEIVED )
@@ -6800,9 +7468,9 @@ TickType_t uxTaskResetEventItemValue( void )
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             traceTASK_NOTIFY_WAIT( uxIndexToWait );
 
@@ -6832,7 +7500,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
             pxCurrentTCB->ucNotifyState[ uxIndexToWait ] = taskNOT_WAITING_NOTIFICATION;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return xReturn;
     }
@@ -6856,7 +7524,7 @@ TickType_t uxTaskResetEventItemValue( void )
         configASSERT( xTaskToNotify );
         pxTCB = xTaskToNotify;
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             if( pulPreviousNotificationValue != NULL )
             {
@@ -6967,7 +7635,7 @@ TickType_t uxTaskResetEventItemValue( void )
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return xReturn;
     }
@@ -7012,7 +7680,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
         pxTCB = xTaskToNotify;
 
-        uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+        uxSavedInterruptStatus = kernelENTER_CRITICAL_FROM_ISR();
         {
             if( pulPreviousNotificationValue != NULL )
             {
@@ -7126,7 +7794,7 @@ TickType_t uxTaskResetEventItemValue( void )
                 #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
             }
         }
-        taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
+        kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
 
         return xReturn;
     }
@@ -7167,7 +7835,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
         pxTCB = xTaskToNotify;
 
-        uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
+        uxSavedInterruptStatus = kernelENTER_CRITICAL_FROM_ISR();
         {
             ucOriginalNotifyState = pxTCB->ucNotifyState[ uxIndexToNotify ];
             pxTCB->ucNotifyState[ uxIndexToNotify ] = taskNOTIFICATION_RECEIVED;
@@ -7237,7 +7905,7 @@ TickType_t uxTaskResetEventItemValue( void )
                 #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
             }
         }
-        taskEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
+        kernelEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
     }
 
 #endif /* configUSE_TASK_NOTIFICATIONS */
@@ -7257,7 +7925,7 @@ TickType_t uxTaskResetEventItemValue( void )
          * its notification state cleared. */
         pxTCB = prvGetTCBFromHandle( xTask );
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             if( pxTCB->ucNotifyState[ uxIndexToClear ] == taskNOTIFICATION_RECEIVED )
             {
@@ -7269,7 +7937,7 @@ TickType_t uxTaskResetEventItemValue( void )
                 xReturn = pdFAIL;
             }
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return xReturn;
     }
@@ -7290,14 +7958,14 @@ TickType_t uxTaskResetEventItemValue( void )
          * its notification state cleared. */
         pxTCB = prvGetTCBFromHandle( xTask );
 
-        taskENTER_CRITICAL();
+        kernelENTER_CRITICAL();
         {
             /* Return the notification as it was before the bits were cleared,
              * then clear the bit mask. */
             ulReturn = pxTCB->ulNotifiedValue[ uxIndexToClear ];
             pxTCB->ulNotifiedValue[ uxIndexToClear ] &= ~ulBitsToClear;
         }
-        taskEXIT_CRITICAL();
+        kernelEXIT_CRITICAL();
 
         return ulReturn;
     }
@@ -7488,6 +8156,20 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
     #endif
 
 #endif /* if ( configINCLUDE_FREERTOS_TASK_C_ADDITIONS_H == 1 ) */
+
+#if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+    void vTaskKernelLock( void )
+    {
+        kernelENTER_CRITICAL();
+    }
+
+    void vTaskKernelUnlock( void )
+    {
+        kernelEXIT_CRITICAL();
+    }
+
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
 #if ( ( ESP_PLATFORM == 1 ) && ( configNUM_CORES > 1 ) )
 /*

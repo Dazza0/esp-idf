@@ -143,6 +143,53 @@ void vPortExitCriticalIDF(portMUX_TYPE *lock)
     }
 }
 
+
+#if ( ( portGRANULAR_LOCKING == 1 ) && ( portCRITICAL_NESTING_IN_TCB == 0 ) )
+
+BaseType_t port_uxCriticalNestingSMP[portNUM_PROCESSORS] = {0};
+
+void vPortEnterCriticalWithLock(portMUX_TYPE *lock)
+{
+    assert(!xPortCheckIfInISR());
+    XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL);
+    spinlock_acquire(lock, SPINLOCK_WAIT_FOREVER);
+    port_uxCriticalNestingSMP[xPortGetCoreID()]++;
+    assert(port_uxCriticalNestingSMP[xPortGetCoreID()] > 0);
+}
+
+void vPortExitCriticalWithLock(portMUX_TYPE *lock)
+{
+    assert(!xPortCheckIfInISR());
+    assert(port_uxCriticalNestingSMP[xPortGetCoreID()] > 0);
+    spinlock_release(lock);
+    port_uxCriticalNestingSMP[xPortGetCoreID()]--;
+    if (port_uxCriticalNestingSMP[xPortGetCoreID()] == 0) {
+        XTOS_SET_INTLEVEL(0);
+    }
+}
+
+UBaseType_t vPortEnterCriticalWithLockFromISR(portMUX_TYPE *lock)
+{
+    assert(xPortCheckIfInISR());
+    UBaseType_t prev_level = XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL);
+    spinlock_acquire(lock, SPINLOCK_WAIT_FOREVER);
+    port_uxCriticalNestingSMP[xPortGetCoreID()]++;
+    return prev_level;
+}
+
+void vPortExitCriticalWithLockFromISR(portMUX_TYPE *lock, UBaseType_t uxSavedInterruptStatus)
+{
+    assert(xPortCheckIfInISR());
+    assert(port_uxCriticalNestingSMP[xPortGetCoreID()] > 0);
+    spinlock_release(lock);
+    port_uxCriticalNestingSMP[xPortGetCoreID()]--;
+    if (port_uxCriticalNestingSMP[xPortGetCoreID()] == 0) {
+        portRESTORE_INTERRUPTS(uxSavedInterruptStatus);
+    }
+}
+
+#endif /* #if ( ( portGRANULAR_LOCKING == 1 ) && ( portCRITICAL_NESTING_IN_TCB == 1 ) ) */
+
 /*
 In case any IDF libs called the port critical functions directly instead of through the macros.
 Just inline call the IDF versions

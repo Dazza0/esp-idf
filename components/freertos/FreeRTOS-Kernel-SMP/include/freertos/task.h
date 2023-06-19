@@ -205,6 +205,15 @@ typedef enum
  */
 #define taskYIELD()                          portYIELD()
 
+#if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+    extern void vTaskEnterCriticalWithLock( portSPINLOCK_TYPE * pxLock );
+    extern UBaseType_t vTaskEnterCriticalFromISRWithLock( portSPINLOCK_TYPE * pxLock );
+    extern void vTaskExitCriticalWithLock( portSPINLOCK_TYPE * pxLock );
+    extern void vTaskExitCriticalWithLockFromISR( portSPINLOCK_TYPE * pxLock,
+                                                  UBaseType_t uxSavedInterruptStatus );
+    extern portSPINLOCK_TYPE xUserLock;
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
+
 /**
  * task. h
  *
@@ -217,12 +226,19 @@ typedef enum
  * \defgroup taskENTER_CRITICAL taskENTER_CRITICAL
  * \ingroup SchedulerControl
  */
-#define taskENTER_CRITICAL()                 portENTER_CRITICAL()
-#if ( configNUMBER_OF_CORES == 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 0 ) || ( FREERTOS_CRIT_IMPL == 1 ) )
+    #define taskENTER_CRITICAL()             portENTER_CRITICAL()
     #define taskENTER_CRITICAL_FROM_ISR()    portSET_INTERRUPT_MASK_FROM_ISR()
-#else
+#elif ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+    #define taskENTER_CRITICAL()             portENTER_CRITICAL()
     #define taskENTER_CRITICAL_FROM_ISR()    portENTER_CRITICAL_FROM_ISR()
-#endif
+#elif ( FREERTOS_CRIT_IMPL == 4 )
+    #define taskENTER_CRITICAL()             vTaskEnterCriticalWithLock( &xUserLock )
+    #define taskENTER_CRITICAL_FROM_ISR()    vTaskEnterCriticalFromISRWithLock( &xUserLock )
+#else /* FREERTOS_CRIT_IMPL == 5 */
+    #define taskENTER_CRITICAL()             portENTER_CRITICAL_WITH_LOCK( &xUserLock )
+    #define taskENTER_CRITICAL_FROM_ISR()    portENTER_CRITICAL_WITH_LOCK_FROM_ISR( &xUserLock )
+#endif /* FREERTOS_CRIT_IMPL */
 
 /**
  * task. h
@@ -236,12 +252,19 @@ typedef enum
  * \defgroup taskEXIT_CRITICAL taskEXIT_CRITICAL
  * \ingroup SchedulerControl
  */
-#define taskEXIT_CRITICAL()                    portEXIT_CRITICAL()
-#if ( configNUMBER_OF_CORES == 1 )
+#if ( ( FREERTOS_CRIT_IMPL == 0 ) || ( FREERTOS_CRIT_IMPL == 1 ) )
+    #define taskEXIT_CRITICAL()                portEXIT_CRITICAL()
     #define taskEXIT_CRITICAL_FROM_ISR( x )    portCLEAR_INTERRUPT_MASK_FROM_ISR( x )
-#else
+#elif ( ( FREERTOS_CRIT_IMPL == 2 ) || ( FREERTOS_CRIT_IMPL == 3 ) )
+    #define taskEXIT_CRITICAL()                portEXIT_CRITICAL()
     #define taskEXIT_CRITICAL_FROM_ISR( x )    portEXIT_CRITICAL_FROM_ISR( x )
-#endif
+#elif ( FREERTOS_CRIT_IMPL == 4 )
+    #define taskEXIT_CRITICAL()                vTaskExitCriticalWithLock( &xUserLock )
+    #define taskEXIT_CRITICAL_FROM_ISR( x )    vTaskExitCriticalWithLockFromISR( &xUserLock, x )
+#else /* FREERTOS_CRIT_IMPL == 5 */
+    #define taskEXIT_CRITICAL()                portEXIT_CRITICAL_WITH_LOCK( &xUserLock )
+    #define taskEXIT_CRITICAL_FROM_ISR( x )    portEXIT_CRITICAL_WITH_LOCK_FROM_ISR( &xUserLock, x )
+#endif /* FREERTOS_CRIT_IMPL */
 
 /**
  * task. h
@@ -3364,6 +3387,20 @@ void vTaskInternalSetTimeOutState( TimeOut_t * const pxTimeOut ) PRIVILEGED_FUNC
  * For SMP this is not defined by the port.
  */
 void vTaskYieldWithinAPI( void );
+
+/*
+For funcitons that access the kernel data group directly (e.g.,
+xEventGroupSetBits() walking the event xTasksWaitingForBits event list
+directly), they will need to call these functions to take/release the kernel
+data group's locks.
+*/
+#if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+    void vTaskKernelLock( void );
+
+    void vTaskKernelUnlock( void );
+
+#endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
 #ifdef ESP_PLATFORM
 

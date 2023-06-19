@@ -71,6 +71,18 @@
     #define tmrSTATUS_IS_STATICALLY_ALLOCATED    ( ( uint8_t ) 0x02 )
     #define tmrSTATUS_IS_AUTORELOAD              ( ( uint8_t ) 0x04 )
 
+
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+        #define timerENTER_CRITICAL( pxTimerLock )    taskENTER_CRITICAL()
+        #define timerEXIT_CRITICAL( pxTimerLock )     taskEXIT_CRITICAL()
+    #elif ( FREERTOS_CRIT_IMPL == 4 )
+        #define timerENTER_CRITICAL( pxTimerLock )    vTaskEnterCriticalWithLock( pxTimerLock )
+        #define timerEXIT_CRITICAL( pxTimerLock )     vTaskExitCriticalWithLock( pxTimerLock )
+    #else /* ( FREERTOS_CRIT_IMPL == 5 ) */
+        #define timerENTER_CRITICAL( pxTimerLock )    portENTER_CRITICAL_WITH_LOCK( pxTimerLock )
+        #define timerEXIT_CRITICAL( pxTimerLock )     portEXIT_CRITICAL_WITH_LOCK( pxTimerLock )
+    #endif /* FREERTOS_CRIT_IMPL */
+
 /* The definition of the timers themselves. */
     typedef struct tmrTimerControl                                               /* The old naming convention is used to prevent breaking kernel aware debuggers. */
     {
@@ -143,6 +155,12 @@
 /* A queue that is used to send commands to the timer service task. */
     PRIVILEGED_DATA static QueueHandle_t xTimerQueue = NULL;
     PRIVILEGED_DATA static TaskHandle_t xTimerTaskHandle = NULL;
+
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+
+        PRIVILEGED_DATA static portSPINLOCK_TYPE xTimerLock = portSPINLOCK_TIMER_INIT_STATIC;
+
+    #endif /* #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) ) */
 
 /*lint -restore */
 
@@ -495,7 +513,7 @@
         Timer_t * pxTimer = xTimer;
 
         configASSERT( xTimer );
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             if( xAutoReload != pdFALSE )
             {
@@ -506,7 +524,7 @@
                 pxTimer->ucStatus &= ( ( uint8_t ) ~tmrSTATUS_IS_AUTORELOAD );
             }
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
     }
 /*-----------------------------------------------------------*/
 
@@ -516,7 +534,7 @@
         BaseType_t xReturn;
 
         configASSERT( xTimer );
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             if( ( pxTimer->ucStatus & tmrSTATUS_IS_AUTORELOAD ) == 0 )
             {
@@ -529,7 +547,7 @@
                 xReturn = pdTRUE;
             }
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
 
         return xReturn;
     }
@@ -672,7 +690,13 @@
         TickType_t xTimeNow;
         BaseType_t xTimerListsWereSwitched;
 
-        vTaskSuspendAll();
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Dropping determinism requirement for granular locks. Simply use
+             * a critical section. */
+            timerENTER_CRITICAL( &xTimerLock );
+        #else
+            vTaskSuspendAll();
+        #endif
         {
             /* Obtain the time now to make an assessment as to whether the timer
              * has expired or not.  If obtaining the time causes the lists to switch
@@ -686,7 +710,11 @@
                 /* The tick count has not overflowed, has the timer expired? */
                 if( ( xListWasEmpty == pdFALSE ) && ( xNextExpireTime <= xTimeNow ) )
                 {
-                    ( void ) xTaskResumeAll();
+                    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                        timerEXIT_CRITICAL( &xTimerLock );
+                    #else
+                        ( void ) xTaskResumeAll();
+                    #endif
                     prvProcessExpiredTimer( xNextExpireTime, xTimeNow );
                 }
                 else
@@ -706,7 +734,14 @@
 
                     vQueueWaitForMessageRestricted( xTimerQueue, ( xNextExpireTime - xTimeNow ), xListWasEmpty );
 
-                    if( xTaskResumeAll() == pdFALSE )
+                    BaseType_t xAlreadyYielded;
+                    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                        timerEXIT_CRITICAL( &xTimerLock );
+                        xAlreadyYielded = pdFALSE;
+                    #else
+                        xAlreadyYielded = xTaskResumeAll();
+                    #endif
+                    if( xAlreadyYielded == pdFALSE )
                     {
                         /* Yield to wait for either a command to arrive, or the
                          * block time to expire.  If a command arrived between the
@@ -730,7 +765,11 @@
             }
             else
             {
-                ( void ) xTaskResumeAll();
+                #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                    timerEXIT_CRITICAL( &xTimerLock );
+                #else
+                    ( void ) xTaskResumeAll();
+                #endif
             }
         }
     }
@@ -1008,7 +1047,7 @@
         /* Check that the list from which active timers are referenced, and the
          * queue used to communicate with the timer service, have been
          * initialised. */
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             if( xTimerQueue == NULL )
             {
@@ -1050,7 +1089,7 @@
                 mtCOVERAGE_TEST_MARKER();
             }
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
     }
 /*-----------------------------------------------------------*/
 
@@ -1062,7 +1101,7 @@
         configASSERT( xTimer );
 
         /* Is the timer in the list of active timers? */
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             if( ( pxTimer->ucStatus & tmrSTATUS_IS_ACTIVE ) == 0 )
             {
@@ -1073,7 +1112,7 @@
                 xReturn = pdTRUE;
             }
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
 
         return xReturn;
     } /*lint !e818 Can't be pointer to const due to the typedef. */
@@ -1086,11 +1125,11 @@
 
         configASSERT( xTimer );
 
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             pvReturn = pxTimer->pvTimerID;
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
 
         return pvReturn;
     }
@@ -1103,11 +1142,11 @@
 
         configASSERT( xTimer );
 
-        taskENTER_CRITICAL();
+        timerENTER_CRITICAL( &xTimerLock );
         {
             pxTimer->pvTimerID = pvNewID;
         }
-        taskEXIT_CRITICAL();
+        timerEXIT_CRITICAL( &xTimerLock );
     }
 /*-----------------------------------------------------------*/
 
