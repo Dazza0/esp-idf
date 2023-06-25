@@ -259,8 +259,12 @@ Note: XTOS_RESTORE_INTLEVEL() will overwrite entire PS register on XEA2. So we n
     // vTaskYieldWithinAPI is not provided in single core. Need to provide portYIELD_WITHIN_API() instead
     #define portYIELD_WITHIN_API()                  esp_crosscore_int_send_yield(xPortGetCoreID())
 #else
-    // vTaskYieldWithinAPI IS provided. But we need to provide provide portYIELD_WITHIN_API() for other IDF components
-    #define portYIELD_WITHIN_API()                  vTaskYieldWithinAPI()
+    /* vTaskYieldWithinAPI IS provided. But we need to provide provide portYIELD_WITHIN_API() for other IDF components
+     * that need to yield in IDF style critical sections. */
+    #define portYIELD_WITHIN_API()                  esp_crosscore_int_send_yield(xPortGetCoreID())
+    /* Pend a yield inside a granular lock critical section. we achieve this by simply setting an ISR that we will
+     * automatically jump to when the critical section exits. */
+    #define portPEND_YIELD_IN_CRIT()                esp_crosscore_int_send_yield(xPortGetCoreID())
 #endif
 #if defined(__cplusplus) && (__cplusplus >  201703L)
 #define portYIELD_FROM_ISR(...)                     CHOOSE_MACRO_VA_ARG(portYIELD_FROM_ISR_CHECK, portYIELD_FROM_ISR_NO_CHECK __VA_OPT__(,) __VA_ARGS__)(__VA_ARGS__)

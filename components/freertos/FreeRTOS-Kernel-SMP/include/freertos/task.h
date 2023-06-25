@@ -3384,7 +3384,9 @@ void vTaskInternalSetTimeOutState( TimeOut_t * const pxTimeOut ) PRIVILEGED_FUNC
 
 /*
  * For internal use only. Same as portYIELD_WITHIN_API() in single core FreeRTOS.
- * For SMP this is not defined by the port.
+ * For SMP where the critical section funcitons are provided by FreeRTOS, this
+ * function is used to pending yields inside critical sections until the section
+ * exits.
  */
 void vTaskYieldWithinAPI( void );
 

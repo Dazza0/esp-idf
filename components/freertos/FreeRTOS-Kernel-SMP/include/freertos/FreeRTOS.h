@@ -1505,7 +1505,12 @@ typedef struct xSTATIC_TCB
     UBaseType_t uxDummy5;
     void * pxDummy6;
     #if ( configNUMBER_OF_CORES > 1 )
-        BaseType_t xDummy23;
+        #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+            BaseType_t xDummy23;
+        #elif ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            BaseType_t xDummy23a;
+            BaseType_t xDummy23b;
+        #endif /* FREERTOS_CRIT_IMPL */
         UBaseType_t uxDummy24;
     #endif
     uint8_t ucDummy7[ configMAX_TASK_NAME_LEN ];

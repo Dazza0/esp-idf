@@ -299,14 +299,25 @@
     #define taskEVENT_LIST_ITEM_VALUE_IN_USE    0x80000000UL
 #endif
 
-/* Task state. */
-typedef BaseType_t TaskRunning_t;
+#if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+    /* Task state. */
+    typedef BaseType_t TaskRunning_t;
 
-/* Indicates that the task is not actively running on any core. */
-#define taskTASK_NOT_RUNNING    ( TaskRunning_t ) ( -1 )
+    /* Indicates that the task is not actively running on any core. */
+    #define taskTASK_NOT_RUNNING    ( TaskRunning_t ) ( -1 )
 
-/* Indicates that the task is actively running but scheduled to yield. */
-#define taskTASK_YIELDING       ( TaskRunning_t ) ( -2 )
+    /* Indicates that the task is actively running but scheduled to yield. */
+    #define taskTASK_YIELDING       ( TaskRunning_t ) ( -2 )
+#else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+    typedef enum
+    {
+        eInternalTaskStateNotRunning = 0,
+        eInternalTaskStateRunning,
+        eInternalTaskStatePendingYieldPreempt,
+        eInternalTaskStatePendingYieldSuspend,
+        eInternalTaskStatePendingYieldDelete,
+    } eInternalTaskState;
+#endif /* FREERTOS_CRIT_IMPL */
 
 /* taskTASK_IS_RUNNING - Returns pdTRUE if the task is actively running
  *                       and not scheduled to yield.
@@ -317,8 +328,24 @@ typedef BaseType_t TaskRunning_t;
     #define taskTASK_IS_RUNNING( pxTCB )     ( pxTCB == pxCurrentTCB )
     #define taskTASK_IS_YIELDING( pxTCB )    ( pdFALSE )
 #else
-    #define taskTASK_IS_RUNNING( pxTCB )     ( ( pxTCB->xTaskRunState >= 0 ) && ( pxTCB->xTaskRunState < configNUMBER_OF_CORES ) )
-    #define taskTASK_IS_YIELDING( pxTCB )    ( pxTCB->xTaskRunState == taskTASK_YIELDING )
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+        #define taskTASK_IS_NOT_RUNNING( pxTCB )                ( pxTCB->xTaskRunState == taskTASK_NOT_RUNNING )
+        #define taskTASK_IS_RUNNING( pxTCB )                    ( ( pxTCB->xTaskRunState >= 0 ) && ( pxTCB->xTaskRunState < configNUMBER_OF_CORES ) )
+        #define taskTASK_IS_YIELDING( pxTCB )                   ( pxTCB->xTaskRunState == taskTASK_YIELDING )
+        #define taskTASK_IS_RUNNING_ON_CORE( pxTCB, xCoreID )   ( pxTCB->xTaskRunState == xCoreID )
+        #define taskMARK_TASK_IS_RUNNING( pxTCB, xCoreID )      ( pxTCB->xTaskRunState = ( TaskRunning_t ) xCoreID )
+        #define taskMARK_TASK_IS_NOT_RUNNING( pxTCB )           ( pxTCB->xTaskRunState = taskTASK_NOT_RUNNING )
+        #define taskMARK_TASK_IS_YIELDING( pxTCB )              ( pxTCB->xTaskRunState = taskTASK_YIELDING )
+        #define taskGET_CUR_CORE( pxTCB )                       ( pxTCB->xTaskRunState )
+    #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+        #define taskTASK_IS_NOT_RUNNING( pxTCB )                        ( pxTCB->eTaskInternalState == eInternalTaskStateNotRunning )
+        #define taskTASK_IS_RUNNING( pxTCB )                            ( pxTCB->eTaskInternalState == eInternalTaskStateRunning )
+        #define taskTASK_IS_YIELDING( pxTCB )                           ( pxTCB->eTaskInternalState >= eInternalTaskStatePendingYieldPreempt )
+        #define taskTASK_IS_RUNNING_ON_CORE( pxTCB, xCoreID )           ( ( pxTCB->eTaskInternalState == eInternalTaskStateRunning ) && ( pxTCB->xTaskCurCore == xCoreID ) )
+        #define taskMARK_TASK_IS_RUNNING( pxTCB, xCoreID )              ( { pxTCB->eTaskInternalState = eInternalTaskStateRunning; pxTCB->xTaskCurCore = xCoreID; } )
+        #define taskMARK_TASK_IS_NOT_RUNNING( pxTCB )                   ( { pxTCB->eTaskInternalState = eInternalTaskStateNotRunning; pxTCB->xTaskCurCore = 0; } )
+        #define taskGET_CUR_CORE( pxTCB )                               ( pxTCB->xTaskCurCore )
+    #endif /* FREERTOS_CRIT_IMPL */
 #endif
 
 /* Indicates that the task is an Idle task. */
@@ -359,7 +386,12 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
     UBaseType_t uxPriority;                     /*< The priority of the task.  0 is the lowest priority. */
     StackType_t * pxStack;                      /*< Points to the start of the stack. */
     #if ( configNUMBER_OF_CORES > 1 )
-        volatile TaskRunning_t xTaskRunState;   /*< Used to identify the core the task is running on, if the task is running. Otherwise, identifies the task's state - not running or yielding. */
+        #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+            volatile TaskRunning_t xTaskRunState;   /*< Used to identify the core the task is running on, if the task is running. Otherwise, identifies the task's state - not running or yielding. */
+        #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+            volatile UBaseType_t xTaskCurCore;
+            volatile eInternalTaskState eTaskInternalState;
+        #endif /* FREERTOS_CRIT_IMPL */
         UBaseType_t uxTaskAttributes;           /*< Task's attributes - currently used to identify the idle tasks. */
     #endif
     char pcTaskName[ configMAX_TASK_NAME_LEN ]; /*< Descriptive name given to the task when created.  Facilitates debugging only. */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
@@ -549,10 +581,30 @@ static BaseType_t prvCreateIdleTasks( void );
 
 #if ( configNUMBER_OF_CORES > 1 )
 
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
 /*
  * Yields the given core.
  */
-    static void prvYieldCore( BaseType_t xCoreID );
+        static void prvYieldCore( BaseType_t xCoreID );
+
+/*
+ * Wrapper macro to dispose the yield reason argument
+ */
+        #define prvYieldCore( xCoreID, eYieldReason )   prvYieldCoreImpl( xCoreID )
+
+    #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+
+/*
+ * Request a yield of the given core with the provided reason for the yield
+ */
+        static void prvYieldCoreImpl( BaseType_t xCoreID, eInternalTaskState eYieldReason );
+
+/*
+ * Wrapper macro to provide the yield reason argument
+ */
+        #define prvYieldCore( xCoreID, eYieldReason )   prvYieldCoreImpl( xCoreID, eYieldReason )
+
+    #endif /* FREERTOS_CRIT_IMPL */
 #endif /* #if ( configNUMBER_OF_CORES > 1 ) */
 
 #if ( configNUMBER_OF_CORES > 1 )
@@ -763,7 +815,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
              * so this is safe. */
             pxThisTCB = pxCurrentTCBs[ portGET_CORE_ID() ];
 
-            while( pxThisTCB->xTaskRunState == taskTASK_YIELDING )
+            while( taskTASK_IS_YIELDING( pxThisTCB ) )
             {
                 /* We are only here if we just entered a critical section
                 * or if we just suspended the scheduler, and another task
@@ -795,14 +847,14 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                 portRELEASE_TASK_LOCK();
 
                 portMEMORY_BARRIER();
-                configASSERT( pxThisTCB->xTaskRunState == taskTASK_YIELDING );
+                configASSERT( taskTASK_IS_YIELDING( pxThisTCB ) );
 
                 portENABLE_INTERRUPTS();
 
                 /* Enabling interrupts should cause this core to immediately
                  * service the pending interrupt and yield. If the run state is still
                  * yielding here then that is a problem. */
-                configASSERT( pxThisTCB->xTaskRunState != taskTASK_YIELDING );
+                configASSERT( !taskTASK_IS_YIELDING( pxThisTCB ) );
 
                 portDISABLE_INTERRUPTS();
                 portGET_TASK_LOCK();
@@ -834,24 +886,24 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
         pxThisTCB = pxCurrentTCBs[ portGET_CORE_ID() ];
 
-        while( pxThisTCB->xTaskRunState == taskTASK_YIELDING )
+        while( taskTASK_IS_YIELDING( pxThisTCB ) )
         {
             configASSERT( uxSchedulerSuspended == 1U );
             uxSchedulerSuspended = 0U;
 
             portRELEASE_LOCK( &xKernelTaskLock );
             portMEMORY_BARRIER();
-            configASSERT( pxThisTCB->xTaskRunState == taskTASK_YIELDING );
+            configASSERT( taskTASK_IS_YIELDING( pxThisTCB ) );
             portENABLE_INTERRUPTS();
 
             /* Enabling interrupts should cause this core to immediately
-             * service the pending interrupt and yield. If the run state is still
-             * yielding here then that is a problem. */
-            configASSERT( pxThisTCB->xTaskRunState != taskTASK_YIELDING );
+             * service the pending interrupt and yield. */
 
             portDISABLE_INTERRUPTS();
             portTAKE_LOCK( &xKernelTaskLock );
             uxSchedulerSuspended = 1U;
+            /* At this point, another pending yield may be triggered. Thus we
+             * cycle back around to check again. */
         }
     }
 #endif /* FREERTOS_CRIT_IMPL */
@@ -859,29 +911,85 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 /*-----------------------------------------------------------*/
 
 #if ( configNUMBER_OF_CORES > 1 )
-    static void prvYieldCore( BaseType_t xCoreID )
-    {
-        /* This must be called from a critical section and xCoreID must be valid. */
-        if( ( portCHECK_IF_IN_ISR() == pdTRUE ) && ( xCoreID == portGET_CORE_ID() ) )
+    #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+        static void prvYieldCoreImpl( BaseType_t xCoreID )
         {
-            xYieldPendings[ xCoreID ] = pdTRUE;
-        }
-        else
-        {
-            if( pxCurrentTCBs[ xCoreID ]->xTaskRunState != taskTASK_YIELDING )
+            /* This must be called from a critical section and xCoreID must be valid. */
+            if( ( portCHECK_IF_IN_ISR() == pdTRUE ) && ( xCoreID == portGET_CORE_ID() ) )
             {
-                if( xCoreID == portGET_CORE_ID() )
+                xYieldPendings[ xCoreID ] = pdTRUE;
+            }
+            else
+            {
+                if( !taskTASK_IS_YIELDING( pxCurrentTCBs[ xCoreID ] ) )
                 {
-                    xYieldPendings[ xCoreID ] = pdTRUE;
-                }
-                else
-                {
-                    portYIELD_CORE( xCoreID );
-                    pxCurrentTCBs[ xCoreID ]->xTaskRunState = taskTASK_YIELDING;
+                    if( xCoreID == portGET_CORE_ID() )
+                    {
+                        xYieldPendings[ xCoreID ] = pdTRUE;
+                    }
+                    else
+                    {
+                        portYIELD_CORE( xCoreID );
+                        pxCurrentTCBs[ xCoreID ]->xTaskRunState = taskTASK_YIELDING;
+                    }
                 }
             }
         }
-    }
+    #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+        static void prvYieldCoreImpl( BaseType_t xCoreID, eInternalTaskState eYieldReason )
+        {
+            BaseType_t xSendYield;
+            /* This must be called from a critical section and xCoreID must be valid. */
+            if( ( portCHECK_IF_IN_ISR() == pdTRUE ) && ( xCoreID == portGET_CORE_ID() ) )
+            {
+                xYieldPendings[ xCoreID ] = pdTRUE;
+                /* Override the yield reason */
+                if( eYieldReason > pxCurrentTCBs[ xCoreID ]->eTaskInternalState )
+                {
+                    pxCurrentTCBs[ xCoreID ]->eTaskInternalState = eYieldReason;
+                }
+            }
+            else
+            {
+                /* Only send a yield if the core is not already pending a yield */
+                if( !taskTASK_IS_YIELDING( pxCurrentTCBs[ xCoreID ] ) )
+                {
+                    xSendYield = pdTRUE;
+                }
+                else
+                {
+                    xSendYield = pdFALSE;
+                }
+
+                /* Override the yield reason if necessary */
+                if( eYieldReason > pxCurrentTCBs[ xCoreID ]->eTaskInternalState )
+                {
+                    pxCurrentTCBs[ xCoreID ]->eTaskInternalState = eYieldReason;
+                }
+
+                if( xSendYield == pdTRUE )
+                {
+                    if( xCoreID == portGET_CORE_ID() )
+                    {
+                        /* Indicate a yield is pending to the kernel (i.e., vTaskSwitchContext()) */
+                        xYieldPendings[ xCoreID ] = pdTRUE;
+                        #if ( FREERTOS_CRIT_IMPL == 5 )
+                            /* Critical section functions are provided by the
+                             * port. Also indicate to the port that a yield is
+                             * required on the current core when the critical
+                             * section exits. */
+                            portPEND_YIELD_IN_CRIT();
+                        #endif /* #if ( FREERTOS_CRIT_IMPL == 5 ) */
+                    }
+                    else
+                    {
+                        /* request a yield on another core */
+                        portYIELD_CORE( xCoreID );
+                    }
+                }
+            }
+        }
+    #endif /* FREERTOS_CRIT_IMPL */
 #endif /* #if ( configNUMBER_OF_CORES > 1 ) */
 /*-----------------------------------------------------------*/
 
@@ -949,7 +1057,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                         if( ( xCurrentCoreTaskPriority > ( ( BaseType_t ) tskIDLE_PRIORITY - 1 ) ) &&
                             ( xCurrentCoreTaskPriority < ( BaseType_t ) pxTCB->uxPriority ) )
                         {
-                            prvYieldCore( xCoreID );
+                            prvYieldCore( xCoreID, eInternalTaskStatePendingYieldPreempt );
                             xYieldCount++;
                         }
                         else
@@ -967,7 +1075,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
             if( ( xYieldCount == 0 ) && ( taskVALID_CORE_ID( xLowestPriorityCore ) == pdTRUE ) )
             {
-                prvYieldCore( xLowestPriorityCore );
+                prvYieldCore( xLowestPriorityCore, eInternalTaskStatePendingYieldPreempt );
             }
 
             #if ( configRUN_MULTIPLE_PRIORITIES == 0 )
@@ -1062,32 +1170,32 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                     }
                     #endif /* #if ( configRUN_MULTIPLE_PRIORITIES == 0 ) */
 
-                    if( pxTCB->xTaskRunState == taskTASK_NOT_RUNNING )
+                    if( taskTASK_IS_NOT_RUNNING( pxTCB ) )
                     {
                         #if ( configUSE_CORE_AFFINITY == 1 )
                             if( ( pxTCB->uxCoreAffinityMask & ( 1 << xCoreID ) ) != 0 )
                         #endif
                         {
                             /* If the task is not being executed by any core swap it in. */
-                            pxCurrentTCBs[ xCoreID ]->xTaskRunState = taskTASK_NOT_RUNNING;
+                            taskMARK_TASK_IS_NOT_RUNNING( pxCurrentTCBs[ xCoreID ] );
+                            taskMARK_TASK_IS_RUNNING( pxTCB, xCoreID );
                             #if ( configUSE_CORE_AFFINITY == 1 )
                                 pxPreviousTCB = pxCurrentTCBs[ xCoreID ];
                             #endif
-                            pxTCB->xTaskRunState = ( TaskRunning_t ) xCoreID;
                             pxCurrentTCBs[ xCoreID ] = pxTCB;
                             xTaskScheduled = pdTRUE;
                         }
                     }
                     else if( pxTCB == pxCurrentTCBs[ xCoreID ] )
                     {
-                        configASSERT( ( pxTCB->xTaskRunState == xCoreID ) || ( pxTCB->xTaskRunState == taskTASK_YIELDING ) );
+                        configASSERT( taskTASK_IS_RUNNING_ON_CORE( pxTCB, xCoreID) || taskTASK_IS_YIELDING( pxTCB ) );
 
                         #if ( configUSE_CORE_AFFINITY == 1 )
                             if( ( pxTCB->uxCoreAffinityMask & ( 1 << xCoreID ) ) != 0 )
                         #endif
                         {
                             /* The task is already running on this core, mark it as scheduled. */
-                            pxTCB->xTaskRunState = ( TaskRunning_t ) xCoreID;
+                            taskMARK_TASK_IS_RUNNING( pxTCB, xCoreID );
                             xTaskScheduled = pdTRUE;
                         }
                     }
@@ -1141,7 +1249,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                     {
                         if( ( pxCurrentTCBs[ x ]->uxTaskAttributes & taskATTRIBUTE_IS_IDLE ) != 0 )
                         {
-                            prvYieldCore( x );
+                            prvYieldCore( x, eInternalTaskStatePendingYieldPreempt );
                         }
                     }
                 }
@@ -1213,7 +1321,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
                     if( taskVALID_CORE_ID( xLowestPriorityCore ) == pdTRUE )
                     {
-                        prvYieldCore( xLowestPriorityCore );
+                        prvYieldCore( xLowestPriorityCore, eInternalTaskStatePendingYieldPreempt );
                     }
                 }
             }
@@ -1766,7 +1874,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     /* Initialize task state and task attributes. */
     #if ( configNUMBER_OF_CORES > 1 )
     {
-        pxNewTCB->xTaskRunState = taskTASK_NOT_RUNNING;
+        #if ( ( FREERTOS_CRIT_IMPL >= 0 ) && ( FREERTOS_CRIT_IMPL < 4 ) )
+            pxNewTCB->xTaskRunState = taskTASK_NOT_RUNNING;
+        #else /* ( ( FREERTOS_CRIT_IMPL >= 4 ) && ( FREERTOS_CRIT_IMPL < 6 ) ) */
+            pxNewTCB->xTaskCurCore = 0;
+            pxNewTCB->eTaskInternalState = eInternalTaskStateNotRunning;
+        #endif /* FREERTOS_CRIT_IMPL */
 
         /* Is this an idle task? */
         if( ( pxTaskCode == prvIdleTask ) || ( pxTaskCode == prvMinimalIdleTask ) )
@@ -1907,7 +2020,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     {
                         if( pxCurrentTCBs[ xCoreID ] == NULL )
                         {
-                            pxNewTCB->xTaskRunState = xCoreID;
+                            taskMARK_TASK_IS_RUNNING( pxNewTCB, xCoreID );
                             pxCurrentTCBs[ xCoreID ] = pxNewTCB;
                             break;
                         }
@@ -1969,76 +2082,85 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
              * being deleted. */
             pxTCB = prvGetTCBFromHandle( xTaskToDelete );
 
-            /* Remove task from the ready/delayed list. */
-            if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
-            {
-                taskRESET_READY_PRIORITY( pxTCB->uxPriority );
-            }
-            else
-            {
-                mtCOVERAGE_TEST_MARKER();
-            }
-
-            /* Is the task waiting on an event also? */
-            if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
-            {
-                ( void ) uxListRemove( &( pxTCB->xEventListItem ) );
-            }
-            else
-            {
-                mtCOVERAGE_TEST_MARKER();
-            }
-
-            /* Increment the uxTaskNumber also so kernel aware debuggers can
-             * detect that the task lists need re-generating.  This is done before
-             * portPRE_TASK_DELETE_HOOK() as in the Windows port that macro will
-             * not return. */
-            uxTaskNumber++;
-
-            /* If the task is running (or yielding), we must add it to the
-             * termination list so that an idle task can delete it when it is
-             * no longer running. */
-            #if ( configNUMBER_OF_CORES == 1 )
-                if( pxTCB == pxCurrentTCB )
-            #else
-                if( pxTCB->xTaskRunState != taskTASK_NOT_RUNNING )
+            /* Task may have already been deleted and is currently pending a
+             * yield, thus will have already been moved to a different task
+             * list. Only move the task if it's not pending a yield after
+             * vTaskDelete(). */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                if( pxTCB->eTaskInternalState < eInternalTaskStatePendingYieldDelete )
             #endif
             {
-                /* A running task is being deleted.  This cannot complete within the
-                 * task itself, as a context switch to another task is required.
-                 * Place the task in the termination list.  The idle task will
-                 * check the termination list and free up any memory allocated by
-                 * the scheduler for the TCB and stack of the deleted task. */
-                vListInsertEnd( &xTasksWaitingTermination, &( pxTCB->xStateListItem ) );
+                /* Remove task from the ready/delayed list. */
+                if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
+                {
+                    taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
 
-                /* Increment the ucTasksDeleted variable so the idle task knows
-                 * there is a task that has been deleted and that it should therefore
-                 * check the xTasksWaitingTermination list. */
-                ++uxDeletedTasksWaitingCleanUp;
+                /* Is the task waiting on an event also? */
+                if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
+                {
+                    ( void ) uxListRemove( &( pxTCB->xEventListItem ) );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
 
-                /* Call the delete hook before portPRE_TASK_DELETE_HOOK() as
-                 * portPRE_TASK_DELETE_HOOK() does not return in the Win32 port. */
-                traceTASK_DELETE( pxTCB );
+                /* Increment the uxTaskNumber also so kernel aware debuggers can
+                 * detect that the task lists need re-generating.  This is done before
+                 * portPRE_TASK_DELETE_HOOK() as in the Windows port that macro will
+                 * not return. */
+                uxTaskNumber++;
 
-                /* The pre-delete hook is primarily for the Windows simulator,
-                 * in which Windows specific clean up operations are performed,
-                 * after which it is not possible to yield away from this task -
-                 * hence xYieldPending is used to latch that a context switch is
-                 * required. */
+                /* If the task is running (or yielding), we must add it to the
+                 * termination list so that an idle task can delete it when it is
+                 * no longer running. */
                 #if ( configNUMBER_OF_CORES == 1 )
-                    portPRE_TASK_DELETE_HOOK( pxTCB, &xYieldPendings[ 0 ] );
+                    if( pxTCB == pxCurrentTCB )
                 #else
-                    portPRE_TASK_DELETE_HOOK( pxTCB, &xYieldPendings[ pxTCB->xTaskRunState ] );
+                    if( !taskTASK_IS_NOT_RUNNING( pxTCB ) )
                 #endif
-            }
-            else
-            {
-                --uxCurrentNumberOfTasks;
-                traceTASK_DELETE( pxTCB );
+                {
+                    /* A running task is being deleted.  This cannot complete within the
+                     * task itself, as a context switch to another task is required.
+                     * Place the task in the termination list.  The idle task will
+                     * check the termination list and free up any memory allocated by
+                     * the scheduler for the TCB and stack of the deleted task. */
+                    vListInsertEnd( &xTasksWaitingTermination, &( pxTCB->xStateListItem ) );
 
-                /* Reset the next expected unblock time in case it referred to
-                 * the task that has just been deleted. */
-                prvResetNextTaskUnblockTime();
+                    /* Increment the ucTasksDeleted variable so the idle task knows
+                     * there is a task that has been deleted and that it should therefore
+                     * check the xTasksWaitingTermination list. */
+                    ++uxDeletedTasksWaitingCleanUp;
+
+                    /* Call the delete hook before portPRE_TASK_DELETE_HOOK() as
+                     * portPRE_TASK_DELETE_HOOK() does not return in the Win32 port. */
+                    traceTASK_DELETE( pxTCB );
+
+                    /* The pre-delete hook is primarily for the Windows simulator,
+                     * in which Windows specific clean up operations are performed,
+                     * after which it is not possible to yield away from this task -
+                     * hence xYieldPending is used to latch that a context switch is
+                     * required. */
+                    #if ( configNUMBER_OF_CORES == 1 )
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &xYieldPendings[ 0 ] );
+                    #else
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &xYieldPendings[ taskGET_CUR_CORE( pxTCB ) ] );
+                    #endif
+                }
+                else
+                {
+                    --uxCurrentNumberOfTasks;
+                    traceTASK_DELETE( pxTCB );
+
+                    /* Reset the next expected unblock time in case it referred to
+                     * the task that has just been deleted. */
+                    prvResetNextTaskUnblockTime();
+                }
             }
         }
 
@@ -2071,28 +2193,36 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         }
         #else /* #if ( configNUMBER_OF_CORES == 1 ) */
         {
-            /* If a running task is not deleting itself, call prvDeleteTCB. If a running
-             * task deletes itself, prvDeleteTCB is called from prvCheckTasksWaitingTermination
-             * which is called from Idle task. */
-            if( pxTCB->xTaskRunState == taskTASK_NOT_RUNNING )
+            /* Task may have already been deleted and is currently pending a
+             * yield, thus will have already been moved to a different task
+             * list. Only move the task if it's not pending a yield after
+             * vTaskDelete(). */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                if( pxTCB->eTaskInternalState < eInternalTaskStatePendingYieldDelete )
+            #endif
             {
-                prvDeleteTCB( pxTCB );
-            }
-
-            /* Force a reschedule if the task that has just been deleted was running. */
-            if( ( xSchedulerRunning != pdFALSE ) && ( taskTASK_IS_RUNNING( pxTCB ) == pdTRUE ) )
-            {
-                if( pxTCB->xTaskRunState == portGET_CORE_ID() )
+                /* If a running task is not deleting itself, call prvDeleteTCB. If a running
+                 * task deletes itself, prvDeleteTCB is called from prvCheckTasksWaitingTermination
+                 * which is called from Idle task. */
+                if( taskTASK_IS_NOT_RUNNING( pxTCB ) )
                 {
-                    configASSERT( uxSchedulerSuspended == 0 );
-                    vTaskYieldWithinAPI();
+                    prvDeleteTCB( pxTCB );
                 }
-                else
+
+                /* Force a reschedule if the task that has just been deleted was running. */
+                if( ( xSchedulerRunning != pdFALSE ) && ( taskTASK_IS_RUNNING( pxTCB ) == pdTRUE ) )
                 {
-                    prvYieldCore( pxTCB->xTaskRunState );
+                    if( taskTASK_IS_RUNNING_ON_CORE( pxTCB, portGET_CORE_ID() ) )
+                    {
+                        configASSERT( uxSchedulerSuspended == 0 );
+                        vTaskYieldWithinAPI();
+                    }
+                    else
+                    {
+                        prvYieldCore( taskGET_CUR_CORE( pxTCB ), eInternalTaskStatePendingYieldDelete );
+                    }
                 }
             }
-
             kernelEXIT_CRITICAL();
         }
         #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
@@ -2586,7 +2716,16 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * nothing more than change its priority variable. However, if
                  * the task is in a ready list it needs to be removed and placed
                  * in the list appropriate to its new priority. */
-                if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                    /* Task may have already been suspended or deleted and is currently
+                     * pending a yield, thus will have already been moved to a different
+                     * task list. Only move the task if it's not pending a yield after
+                     * vTaskSuspend() or vTaskDelete(). */
+                    if(    ( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                        && ( pxTCB->eTaskInternalState < eInternalTaskStatePendingYieldPreempt ) )
+                #else
+                    if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                #endif
                 {
                     /* The task is currently in its ready list - remove before
                      * adding it to its new ready list.  As we are in a critical
@@ -2638,7 +2777,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     {
                         if( xYieldRequired != pdFALSE )
                         {
-                            prvYieldCore( pxTCB->xTaskRunState );
+                            prvYieldCore( taskGET_CUR_CORE( pxTCB ), eInternalTaskStatePendingYieldPreempt );
                         }
                         else if( xYieldForTask != pdFALSE )
                         {
@@ -2687,13 +2826,13 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             {
                 if( taskTASK_IS_RUNNING( pxTCB ) == pdTRUE )
                 {
-                    xCoreID = ( BaseType_t ) pxTCB->xTaskRunState;
+                    xCoreID = ( BaseType_t ) taskGET_CUR_CORE( pxTCB );
 
                     /* If the task can no longer run on the core it was running,
                      * request the core to yield. */
                     if( ( uxCoreAffinityMask & ( 1 << xCoreID ) ) == 0 )
                     {
-                        prvYieldCore( xCoreID );
+                        prvYieldCore( xCoreID, eInternalTaskStatePendingYieldPreempt );
                     }
                 }
                 else
@@ -2779,8 +2918,8 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             {
                 if( taskTASK_IS_RUNNING( pxTCB ) == pdTRUE )
                 {
-                    xCoreID = ( BaseType_t ) pxTCB->xTaskRunState;
-                    prvYieldCore( xCoreID );
+                    xCoreID = ( BaseType_t ) taskGET_CUR_CORE( pxTCB );
+                    prvYieldCore( xCoreID, eInternalTaskStatePendingYieldPreempt );
                 }
             }
         }
@@ -2797,7 +2936,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         TCB_t * pxTCB;
 
         #if ( configNUMBER_OF_CORES > 1 )
-            TaskRunning_t xTaskRunningOnCore;
+            BaseType_t xTaskRunningOnCore;
         #endif
 
         kernelENTER_CRITICAL();
@@ -2809,49 +2948,57 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             traceTASK_SUSPEND( pxTCB );
 
             #if ( configNUMBER_OF_CORES > 1 )
-                xTaskRunningOnCore = pxTCB->xTaskRunState;
+                xTaskRunningOnCore = taskGET_CUR_CORE( pxTCB );
             #endif
 
-            /* Remove task from the ready/delayed list and place in the
-             * suspended list. */
-            if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
+            /* Task may have already been suspended or deleted and is currently
+             * pending a yield, thus will have already been moved to a different
+             * task list. Only move the task if it's not pending a yield after
+             * vTaskSuspend() or vTaskDelete(). */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                if( pxTCB->eTaskInternalState < eInternalTaskStatePendingYieldSuspend )
+            #endif
             {
-                taskRESET_READY_PRIORITY( pxTCB->uxPriority );
-            }
-            else
-            {
-                mtCOVERAGE_TEST_MARKER();
-            }
-
-            /* Is the task waiting on an event also? */
-            if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
-            {
-                ( void ) uxListRemove( &( pxTCB->xEventListItem ) );
-            }
-            else
-            {
-                mtCOVERAGE_TEST_MARKER();
-            }
-
-            vListInsertEnd( &xSuspendedTaskList, &( pxTCB->xStateListItem ) );
-
-            #if ( configUSE_TASK_NOTIFICATIONS == 1 )
-            {
-                BaseType_t x;
-
-                for( x = 0; x < configTASK_NOTIFICATION_ARRAY_ENTRIES; x++ )
+                /* Remove task from the ready/delayed list and place in the
+                * suspended list. */
+                if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
                 {
-                    if( pxTCB->ucNotifyState[ x ] == taskWAITING_NOTIFICATION )
+                    taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+
+                /* Is the task waiting on an event also? */
+                if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
+                {
+                    ( void ) uxListRemove( &( pxTCB->xEventListItem ) );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+
+                vListInsertEnd( &xSuspendedTaskList, &( pxTCB->xStateListItem ) );
+
+                #if ( configUSE_TASK_NOTIFICATIONS == 1 )
+                {
+                    BaseType_t x;
+
+                    for( x = 0; x < configTASK_NOTIFICATION_ARRAY_ENTRIES; x++ )
                     {
-                        /* The task was blocked to wait for a notification, but is
-                         * now suspended, so no notification was received. */
-                        pxTCB->ucNotifyState[ x ] = taskNOT_WAITING_NOTIFICATION;
+                        if( pxTCB->ucNotifyState[ x ] == taskWAITING_NOTIFICATION )
+                        {
+                            /* The task was blocked to wait for a notification, but is
+                            * now suspended, so no notification was received. */
+                            pxTCB->ucNotifyState[ x ] = taskNOT_WAITING_NOTIFICATION;
+                        }
                     }
                 }
+                #endif /* if ( configUSE_TASK_NOTIFICATIONS == 1 ) */
             }
-            #endif /* if ( configUSE_TASK_NOTIFICATIONS == 1 ) */
         }
-
         #if ( configNUMBER_OF_CORES == 1 )
         {
             kernelEXIT_CRITICAL();
@@ -2905,15 +3052,24 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         }
         #else /* #if ( configNUMBER_OF_CORES == 1 ) */
         {
-            if( xSchedulerRunning != pdFALSE )
+            /* Task may have already been suspended or deleted and is currently
+             * pending a yield, thus will have already been moved to a different
+             * task list. Only move the task if it's not pending a yield after
+             * vTaskSuspend() or vTaskDelete(). */
+            #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+                if( pxTCB->eTaskInternalState < eInternalTaskStatePendingYieldSuspend )
+            #endif
             {
-                /* Reset the next expected unblock time in case it referred to the
-                 * task that is now in the Suspended state. */
-                prvResetNextTaskUnblockTime();
-            }
-            else
-            {
-                mtCOVERAGE_TEST_MARKER();
+                if( xSchedulerRunning != pdFALSE )
+                {
+                    /* Reset the next expected unblock time in case it referred to the
+                    * task that is now in the Suspended state. */
+                    prvResetNextTaskUnblockTime();
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
             }
 
             if( taskTASK_IS_RUNNING( pxTCB ) == pdTRUE )
@@ -2928,7 +3084,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     }
                     else
                     {
-                        prvYieldCore( xTaskRunningOnCore );
+                        prvYieldCore( xTaskRunningOnCore, eInternalTaskStatePendingYieldSuspend );
                     }
                 }
                 else
@@ -4500,7 +4656,7 @@ BaseType_t xTaskIncrementTick( void )
                             }
                             else
                             {
-                                prvYieldCore( x );
+                                prvYieldCore( x, eInternalTaskStatePendingYieldPreempt );
                             }
                         }
                         else
@@ -4856,20 +5012,29 @@ void vTaskPlaceOnEventList( List_t * const pxEventList,
          * SCHEDULER SUSPENDED AND THE QUEUE BEING ACCESSED LOCKED. */
     #endif
 
-    /* Place the event list item of the TCB in the appropriate event list.
-     * This is placed in the list in priority order so the highest priority task
-     * is the first to be woken by the event.
-     *
-     * Note: Lists are sorted in ascending order by ListItem_t.xItemValue.
-     * Normally, the xItemValue of a TCB's ListItem_t members is:
-     *      xItemValue = ( configMAX_PRIORITIES - uxPriority )
-     * Therefore, the event list is sorted in descending priority order.
-     *
-     * The queue that contains the event list is locked, preventing
-     * simultaneous access from interrupts. */
-    vListInsert( pxEventList, &( pxCurrentTCB->xEventListItem ) );
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Task may have already been suspended or deleted and is currently
+         * pending a yield, thus will have already been moved to a different
+         * task list. Only move the task if it's not pending a yield after
+         * vTaskSuspend() or vTaskDelete(). */
+        if( pxCurrentTCB->eTaskInternalState <= eInternalTaskStatePendingYieldPreempt )
+    #endif /* FREERTOS_CRIT_IMPL */
+    {
+        /* Place the event list item of the TCB in the appropriate event list.
+         * This is placed in the list in priority order so the highest priority task
+         * is the first to be woken by the event.
+         *
+         * Note: Lists are sorted in ascending order by ListItem_t.xItemValue.
+         * Normally, the xItemValue of a TCB's ListItem_t members is:
+         *      xItemValue = ( configMAX_PRIORITIES - uxPriority )
+         * Therefore, the event list is sorted in descending priority order.
+         *
+         * The queue that contains the event list is locked, preventing
+         * simultaneous access from interrupts. */
+        vListInsert( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
-    prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+        prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+    }
 
     #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
         /* If using granular locks, we need to release the spinlocks of the
@@ -4912,20 +5077,28 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
         }
     #endif /* FREERTOS_CRIT_IMPL */
 
+    #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+        /* Task may have already been suspended or deleted and is currently
+         * pending a yield, thus will have already been moved to a different
+         * task list. Only move the task if it's not pending a yield after
+         * vTaskSuspend() or vTaskDelete(). */
+        if( pxCurrentTCB->eTaskInternalState <= eInternalTaskStatePendingYieldPreempt )
+    #endif /* FREERTOS_CRIT_IMPL */
+    {
+        /* Store the item value in the event list item.  It is safe to access the
+         * event list item here as interrupts won't access the event list item of a
+         * task that is not in the Blocked state. */
+        listSET_LIST_ITEM_VALUE( &( pxCurrentTCB->xEventListItem ), xItemValue | taskEVENT_LIST_ITEM_VALUE_IN_USE );
 
-    /* Store the item value in the event list item.  It is safe to access the
-     * event list item here as interrupts won't access the event list item of a
-     * task that is not in the Blocked state. */
-    listSET_LIST_ITEM_VALUE( &( pxCurrentTCB->xEventListItem ), xItemValue | taskEVENT_LIST_ITEM_VALUE_IN_USE );
+        /* Place the event list item of the TCB at the end of the appropriate event
+         * list.  It is safe to access the event list here because it is part of an
+         * event group implementation - and interrupts don't access event groups
+         * directly (instead they access them indirectly by pending function calls to
+         * the task level). */
+        listINSERT_END( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
-    /* Place the event list item of the TCB at the end of the appropriate event
-     * list.  It is safe to access the event list here because it is part of an
-     * event group implementation - and interrupts don't access event groups
-     * directly (instead they access them indirectly by pending function calls to
-     * the task level). */
-    listINSERT_END( pxEventList, &( pxCurrentTCB->xEventListItem ) );
-
-    prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+        prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+    }
 
     #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
         /* If using granular locks, we need to release the spinlocks of the
@@ -4972,22 +5145,31 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
          * it should be called with the scheduler suspended. */
 
 
-        /* Place the event list item of the TCB in the appropriate event list.
-         * In this case it is assume that this is the only task that is going to
-         * be waiting on this event list, so the faster vListInsertEnd() function
-         * can be used in place of vListInsert. */
-        listINSERT_END( pxEventList, &( pxCurrentTCB->xEventListItem ) );
-
-        /* If the task should block indefinitely then set the block time to a
-         * value that will be recognised as an indefinite delay inside the
-         * prvAddCurrentTaskToDelayedList() function. */
-        if( xWaitIndefinitely != pdFALSE )
+        #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
+            /* Task may have already been suspended or deleted and is currently
+             * pending a yield, thus will have already been moved to a different
+             * task list. Only move the task if it's not pending a yield after
+             * vTaskSuspend() or vTaskDelete(). */
+            if( pxCurrentTCB->eTaskInternalState <= eInternalTaskStatePendingYieldPreempt )
+        #endif /* FREERTOS_CRIT_IMPL */
         {
-            xTicksToWait = portMAX_DELAY;
-        }
+            /* Place the event list item of the TCB in the appropriate event list.
+             * In this case it is assume that this is the only task that is going to
+             * be waiting on this event list, so the faster vListInsertEnd() function
+             * can be used in place of vListInsert. */
+            listINSERT_END( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
-        traceTASK_DELAY_UNTIL( ( xTickCount + xTicksToWait ) );
-        prvAddCurrentTaskToDelayedList( xTicksToWait, xWaitIndefinitely );
+            /* If the task should block indefinitely then set the block time to a
+             * value that will be recognised as an indefinite delay inside the
+             * prvAddCurrentTaskToDelayedList() function. */
+            if( xWaitIndefinitely != pdFALSE )
+            {
+                xTicksToWait = portMAX_DELAY;
+            }
+
+            traceTASK_DELAY_UNTIL( ( xTickCount + xTicksToWait ) );
+            prvAddCurrentTaskToDelayedList( xTicksToWait, xWaitIndefinitely );
+        }
 
         #if ( ( FREERTOS_CRIT_IMPL == 4 ) || ( FREERTOS_CRIT_IMPL == 5 ) )
             /* If using granular locks, we need to release the spinlocks of the
@@ -5770,7 +5952,7 @@ static void prvCheckTasksWaitingTermination( void )
                     {
                         pxTCB = listGET_OWNER_OF_HEAD_ENTRY( ( &xTasksWaitingTermination ) ); /*lint !e9079 void * is used as this macro is used with timers too.  Alignment is known to be fine as the type of the pointer stored and retrieved is the same. */
 
-                        if( pxTCB->xTaskRunState == taskTASK_NOT_RUNNING )
+                        if( taskTASK_IS_NOT_RUNNING( pxTCB ) )
                         {
                             ( void ) uxListRemove( &( pxTCB->xStateListItem ) );
                             --uxCurrentNumberOfTasks;
@@ -6490,7 +6672,14 @@ static void prvResetNextTaskUnblockTime( void )
         }
         else
         {
+            /* Indicate a yield is pending to the kernel (i.e., vTaskSwitchContext()) */
             xYieldPendings[ portGET_CORE_ID() ] = pdTRUE;
+            #if ( FREERTOS_CRIT_IMPL == 5 )
+                /* Critical section functions are provided by the port. Also
+                 * indicate to the port that a yield is required on the current
+                 * core when the critical section exits. */
+                portPEND_YIELD_IN_CRIT();
+            #endif /* #if ( FREERTOS_CRIT_IMPL == 5 ) */
         }
     }
 #endif /* #if ( configNUMBER_OF_CORES > 1 ) */
@@ -6603,6 +6792,8 @@ static void prvResetNextTaskUnblockTime( void )
 
     void prvKernelExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus )
     {
+        BaseType_t xYieldCurrentTask;
+
         if( xSchedulerRunning != pdFALSE )
         {
             /* If critical nesting count is zero then this function
@@ -6622,7 +6813,19 @@ static void prvResetNextTaskUnblockTime( void )
                 /* If this is the outermost nested call, restore saved interrupt status */
                 if( portGET_CRITICAL_NESTING_COUNT() == 0U )
                 {
+                    /* Get the xYieldPending stats inside the critical section. */
+                    xYieldCurrentTask = xYieldPendings[ portGET_CORE_ID() ];
+
                     portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
+
+                    /* When a task yields in a critical section it just sets
+                     * xYieldPending to true. So now that we have exited the
+                     * critical section check if xYieldPending is true, and
+                     * if so yield. */
+                    if( xYieldCurrentTask != pdFALSE )
+                    {
+                        portYIELD_FROM_ISR();
+                    }
                 }
                 else
                 {
@@ -6754,6 +6957,8 @@ static void prvResetNextTaskUnblockTime( void )
     void vTaskExitCriticalWithLockFromISR( portSPINLOCK_TYPE * pxLock,
                                            UBaseType_t uxSavedInterruptStatus )
     {
+        BaseType_t xYieldCurrentTask;
+
         if( xSchedulerRunning != pdFALSE )
         {
             /* If critical nesting count is zero then this function
@@ -6773,7 +6978,19 @@ static void prvResetNextTaskUnblockTime( void )
                 /* If this is the outermost nested call, restore saved interrupt status */
                 if( portGET_CRITICAL_NESTING_COUNT() == 0U )
                 {
+                    /* Get the xYieldPending stats inside the critical section. */
+                    xYieldCurrentTask = xYieldPendings[ portGET_CORE_ID() ];
+
                     portCLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
+
+                    /* When a task yields in a critical section it just sets
+                     * xYieldPending to true. So now that we have exited the
+                     * critical section check if xYieldPending is true, and
+                     * if so yield. */
+                    if( xYieldCurrentTask != pdFALSE )
+                    {
+                        portYIELD_FROM_ISR();
+                    }
                 }
                 else
                 {
