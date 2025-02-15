@@ -1,1 +1,2 @@
-build.sh
+#!/usr/bin/env bash
+. ./build.sh
