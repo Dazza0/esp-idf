@@ -5,6 +5,7 @@
  */
 #include <stdio.h>
 #include "feat_a.h"
+#include "some_comp.h"
 
 void app_main(void)
 {
