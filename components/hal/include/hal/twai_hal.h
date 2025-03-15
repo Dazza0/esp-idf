@@ -174,6 +174,7 @@ void twai_hal_stop(twai_hal_context_t *hal_ctx);
  */
 static inline void twai_hal_start_bus_recovery(twai_hal_context_t *hal_ctx)
 {
+    TWAI_HAL_CLEAR_BITS(hal_ctx->state_flags, TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED);
     TWAI_HAL_SET_BITS(hal_ctx->state_flags, TWAI_HAL_STATE_FLAG_RECOVERING);
     twai_ll_exit_reset_mode(hal_ctx->dev);
 }
