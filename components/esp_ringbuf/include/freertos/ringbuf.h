@@ -386,6 +386,8 @@ void vRingbufferReturnItem(RingbufHandle_t xRingbuffer, void *pvItem);
  */
 void vRingbufferReturnItemFromISR(RingbufHandle_t xRingbuffer, void *pvItem, BaseType_t *pxHigherPriorityTaskWoken);
 
+void vRingbufferReset(RingbufHandle_t xRingbuffer);
+
 /**
  * @brief   Delete a ring buffer
  *
